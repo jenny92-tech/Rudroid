@@ -10,8 +10,15 @@ Buildroot 2022.05、GLIBC 2.33 上检查。设备树与真实库优先于 PortMa
 A133plus 名称：SDL 2.32.6 使用 KMSDRM，原生输出 1280×720。
 主窗口须由 SDL 完成交换及 page flip，不能只调用原生 `eglSwapBuffers`。
 系统 SDL 未编译 PulseAudio backend，启动器沿用 ALSA 的 Pulse 插件连接现有声卡服务。
-该驱动能创建 Vulkan 1.2 实例并枚举 GPU，但缺当前 Rudroid 所需的 Wayland 呈现会话；
-Vulkan 不可选，保留 GLES。具体标题、内存及验收边界见[验收](ACCEPTANCE.md)。
+系统 SDL 不带 Wayland backend，Vulkan loader 也未编译 Wayland surface 入口；
+当前正式入口仍禁止选择 Vulkan，保留 GLES。不能由这两项推导固件不能运行 Wayland。
+
+后续隔离测试中，PortMaster 自带 Weston 13.0.90 经原生 DRM/Mali-G57 硬件启动。
+局部使用带 Wayland 支持的通用 Vulkan loader 后，实例、Wayland surface 创建成功，
+Mali-G57 Vulkan 1.2.225 图形队列报告可呈现。该 loader 直接要求 GLIBC 2.29，
+仅验证本固件；不能替代核心 kit 的 GLIBC≤2.28 门禁。没有替换系统库或 GPU 驱动。
+尚未接入支持 Wayland 的 SDL，亦未测试交换链、实际提交或游戏性能；服务器/原生
+surface 预检不算游戏验收。具体证据和当前交付边界见[验收](ACCEPTANCE.md)。
 
 ## 系统要求
 

@@ -38,8 +38,14 @@ SDL 单元测试 64 passed / 6 ignored、共享 unsafe 边界 4 passed；真实 
 233 MiB swap；出现加载停顿和音频 underrun。短程可运行不代表 1 GiB 下已经流畅，
 本轮没有有效的同场景帧率对照，不能声称性能提升。
 
-系统原生 Vulkan 1.2 实例/GPU 探测成功，但当前 Rudroid WSI 需要 Wayland；该固件
-只有 KMSDRM，Vulkan 在实际菜单不可选，未强制启动或替换驱动。
+正式入口的系统 SDL 和 Vulkan loader 均缺 Wayland 支持，Vulkan 在实际菜单不可选。
+后续隔离测试中，PortMaster Weston 经原生 DRM/Mali-G57 启动，局部使用兼容的通用
+Vulkan loader 后，实例和 Wayland surface 创建均返回 0，硬件图形队列报告可呈现。
+此为原生预检：没有交换链、GPU 提交或游戏帧；仍需 Wayland SDL 和独立玩法验收。
+Weston 此次空载 RSS 约 50 MiB，不作为游戏运行期内存或性能测量。测试 loader 的
+直接 GLIBC 需求为 2.29，仅用于该 GLIBC 2.33 固件的隔离检查，未加入正式库存；
+没有替换系统库/驱动或更改正式游戏配置。证据在忽略目录
+`crates/target/trimui-wayland-20261019/`，临时显示已退出、前端恢复、测试文件移入回收站。
 MiniLoong 私有新 kit 的空洞骑士 Wayland 标题呈现与退出通过，不扩大为全玩法回归。
 最终 191 项静态部署文件、五套原生检查与特性查询通过；未发现本轮新增内核 OOM/GPU fault，
 前端已恢复。本轮测试/staging 目录移入设备回收站。

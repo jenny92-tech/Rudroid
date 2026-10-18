@@ -8,8 +8,9 @@ Implementation lives in `crates/`; offline resource preparation lives in `tools/
 The sibling Bogodroid C++ tree is a read-only behavior reference, not a dependency.
 Read the [documentation index](docs/README.md), then the relevant module's AGENTS.
 Current acceptance covers five bounded MiniLoong and TrimUI/A523 GLES title paths;
-TrimUI has 1 GiB memory limits and no supported Vulkan presentation. ARM32 and Mono
-remain unverified.
+TrimUI production uses GLES with 1 GiB memory limits; a portable Weston/Vulkan
+surface preflight passes, but game integration is unverified. ARM32 and Mono remain
+unverified.
 
 ## Design
 

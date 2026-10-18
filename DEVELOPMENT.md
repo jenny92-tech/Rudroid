@@ -85,7 +85,7 @@ GC-handle ABI 只用精确证据；HUD 的受限缺 getter 回退不能扩大旧
 | 芯片 64 位就能用 ARM64 kit | 检查用户态与实际依赖 ELF；架构、GLIBC、页大小和驱动分别确认。 |
 | SDL 有 driver 或 Docker Mesa 通过就算能用 | 实机确认窗口/context/present、输出与 guest 尺寸、声音和输入。 |
 | 原生 EGL swap 成功就代表屏幕更新 | 主窗口通过 SDL 绑定并交换；KMSDRM 还需要 SDL 的 GBM/DRM page flip。worker pbuffer 保留原生 EGL，切换时同步 SDL 的线程绑定，不能叠加两次 swap。 |
-| GPU 支持 Vulkan 就能切后端 | 当前 Vulkan WSI 仅支持 Wayland；KMSDRM 上即使原生实例和 GPU 探测成功也不可选，不复制其他固件驱动或绕过启动门禁。 |
+| GPU 支持 Vulkan 就能切后端 | 当前 WSI 需要运行中的 Wayland 会话、支持 Wayland 的 SDL 和 Vulkan loader。KMS 固件可单独启动随包 Weston，但服务器存在不等于客户端库齐备；不复制其他固件驱动或绕过启动门禁。 |
 | 配置能解析就代表功能可用 | 跟到消费者与实际执行；当前支持范围查[能力表](crates/docs/MIGRATION-MAP.md)。 |
 | 统一前缀只是文字替换 | 核对所有导出及内部 native linker 名；zlib 的公开 resolver 与内部 C 查询必须分名，避免错误绑定成递归。ELF 夹具的名称长度、字符串表大小与偏移也要同步。 |
 | mmap hint 就是可用跳板页 | 指定页只用 MAP_FIXED_NOREPLACE 并核对返回地址；失败不得覆盖已有映射。 |
