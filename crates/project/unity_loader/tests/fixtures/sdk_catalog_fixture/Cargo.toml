@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-sdk-catalog-fixture"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "ticket 56 fixture catalog provider for the addon session-registration kits"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "sdk_fixture_catalog"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[workspace]
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

@@ -1,0 +1,27 @@
+[package]
+name = "rudroid-android-elf-load"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Guest ELF/SO load relocate and hook capability"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "android_elf_load"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+libc = "0.2"
+
+[features]
+## Exposes `fixture::build_minimal_aarch64_so` for other crates' tests
+## (guest bring-up tests). Not part of the shipped surface.
+test-fixtures = []
+
+[dev-dependencies]
+rudroid-android-elf-load = { path = ".", features = ["test-fixtures"] }
+# C-API tests dlopen the built cdylib like the loader does (ticket 65).
+libloading = "0.8"

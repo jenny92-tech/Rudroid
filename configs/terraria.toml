@@ -1,0 +1,59 @@
+# Terraria Android 1.4.5.6 / Unity 2021.3.56f2, ARM64 IL2CPP.
+# Local layout: config.toml beside gamedata/, conf/ and cache/.
+# The game takes the parent of Application.persistentDataPath as its save root.
+# Keep external files in conf/files so existing conf/Players and conf/Worlds
+# remain visible; internal files stay in conf for existing shared_prefs.
+# Directory creation and canonicalization belong to the Android facade.
+# This sample preserves the tested 100% render policy; it is not an FPS claim.
+
+[paths]
+game_files = "./gamedata/"
+support_files = "./gamedata/"
+android_package_code = "./"
+android_external_files = "../conf/files/"
+android_files = "../conf/"
+android_cache = "../cache/"
+android_obb_dirs = ["./gamedata/"]
+android_source_dirs = ["./gamedata/"]
+
+[package]
+packageName = "com.and.games505.TerrariaPaid"
+versionName = "1.4.5.6"
+mainIntentBundle = { unity = "" }
+
+[device]
+displayWidth = 640
+displayHeight = 480
+displayRotation = 0
+
+[input]
+controller = true
+# InControl needs a known Android layout, including HAT axes for its D-pad.
+android_xbox360_identity = true
+dpad_synthesize_hat = true
+
+[input.remap]
+a = "BUTTON_A"
+b = "BUTTON_B"
+x = "BUTTON_X"
+y = "BUTTON_Y"
+start = "BUTTON_START"
+select = "BUTTON_SELECT"
+
+[unity]
+block_analytics = true
+
+[gpu]
+renderHeight = 0
+renderWidth = 0
+renderScaleSharp = true
+renderScalePercent = 100
+textureMaxDim = 0
+
+[plugins]
+enabled = [
+    "platform_log_stderr", "android_base", "android_jni_vm", "reply_catalog",
+    "android_elf_load", "android_bionic", "android_native_events",
+    "android_media_fallback", "android_zlib", "android_assets",
+    "platform_sdl_runtime", "unity_2021_3", "sdk_fmod", "terraria_android",
+]

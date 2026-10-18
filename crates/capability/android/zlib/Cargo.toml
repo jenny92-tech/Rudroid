@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-android-zlib"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional guest zlib ABI source sharing the native compression service"
+
+[lib]
+name = "android_zlib"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

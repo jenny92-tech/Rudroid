@@ -1,0 +1,22 @@
+[package]
+name = "rudroid-descriptor-capability"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "Loader test fixture: malformed descriptors (foreign ABI version, empty id) the loader must reject with diagnostics"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[features]
+# Default build: a foreign-layout descriptor (wrong abi_version, unreadable
+# pointers). `empty-id`: a valid same-build descriptor whose id is "".
+empty-id = []
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

@@ -1,0 +1,30 @@
+[package]
+name = "rudroid-linux-sdl-runtime"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Linux Host SDL window and audio policy backend"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "platform_sdl_runtime"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# SDL2 via system libraries (pkg-config). Opt-in on dev machines that have a
+# linkable SDL2; the Linux device build enables it. Builds without it keep
+# the config plumbing, descriptor and audio policy.
+sdl = ["dep:sdl2"]
+# Candidate-only native Wayland WSI; normal GLES kits do not build or load it.
+vulkan = ["sdl", "dep:ash"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-host-config = { path = "../../../common/host-config" }
+sdl2 = { version = "0.37", optional = true, default-features = false }
+# Native EGL entry points are resolved from the driver library; audio
+# integration tests also use this dependency to load the deployed C API.
+libloading = "0.8"
+ash = { version = "=0.38.0", optional = true, default-features = false, features = ["loaded", "std"] }

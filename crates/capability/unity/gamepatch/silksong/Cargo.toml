@@ -1,0 +1,21 @@
+[package]
+name = "rudroid-unity-gamepatch-silksong"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Silksong Title gamepatch (unity6 + viewport, package gated)"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "silksong_unity6"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+rudroid-host-config = { path = "../../../../common/host-config" }
+libc = "0.2"
+
+[dev-dependencies]
+rudroid-test-support = { path = "../../../../test-support" }

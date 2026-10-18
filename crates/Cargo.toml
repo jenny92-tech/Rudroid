@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "common",
+    "test-support",
+    "native-build",
+    "common/host-config",
+    "common/vulkan-wsi-allocator",
+    "capability/android/elf_load",
+    "capability/android/bionic",
+    "capability/android/media_fallback",
+    "capability/android/zlib",
+    "capability/android/native_events",
+    "capability/android/assets",
+    "capability/android/jni_vm",
+    "capability/android/framework",
+    "capability/android/addon/after_unity_module",
+    "capability/android/addon/gms",
+    "capability/android/addon/levelplay",
+    "capability/android/addon/play_core",
+    "capability/android/addon/fmod",
+    "capability/android/addon/unity_burst",
+    "capability/android/addon/unity_helpers",
+    "capability/android/addon/xlua",
+    "capability/android/reply_catalog",
+    "capability/android/reply_catalog/format",
+    "capability/linux/sdl_runtime",
+    "capability/linux/log_stderr",
+    "capability/linux/android_asset_packs",
+    "capability/unity/player_lifecycle",
+    "capability/unity/profile_2021_3",
+    "capability/unity/profile_6",
+    "capability/unity/il2cpp_hook",
+    "capability/unity/memory_policy",
+    "capability/unity/gamepatch/silksong",
+    "capability/unity/gamepatch/hollow_knight",
+    "capability/unity/gamepatch/terraria",
+    "capability/unity/gamepatch/vampire_survivors",
+    "project/unity_loader",
+]
+
+# Fixture crates: own [workspace] and lock file, built on demand by tests, never shipped.
+exclude = [
+    "project/unity_loader/tests/fixtures/audio_policy_capability",
+    "project/unity_loader/tests/fixtures/descriptor_capability",
+    "project/unity_loader/tests/fixtures/dummy_capability",
+    "project/unity_loader/tests/fixtures/failing_capability",
+    "project/unity_loader/tests/fixtures/hooks_capability",
+    "project/unity_loader/tests/fixtures/probe_capability",
+    "project/unity_loader/tests/fixtures/sdk_catalog_fixture",
+    "capability/unity/il2cpp_hook/tests/fixtures/patch_probe",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license-file = "../LICENSE"
+publish = false

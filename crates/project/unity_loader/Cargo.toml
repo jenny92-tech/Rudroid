@@ -1,0 +1,34 @@
+[package]
+name = "rudroid-unity-loader"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Thin Unity Project entry that discovers and dynamically loads capabilities"
+
+[[bin]]
+name = "rudroid-unity-loader"
+path = "src/main.rs"
+
+[dependencies]
+rudroid-common = { path = "../../common" }
+rudroid-host-config = { path = "../../common/host-config" }
+libloading = "0.8"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+rudroid-android-elf-load = { path = "../../capability/android/elf_load", features = ["test-fixtures"] }
+# Test-only: the ticket-81 rework's shared assembly/stub facilities. Never a
+# production link (no descriptor, not a capability).
+rudroid-test-support = { path = "../../test-support" }
+# Test-only: pins the loader's mirrored SDL C API names to the capability's
+# own constants (sdl_session_fixture parity test). Never a production link —
+# the runtime dlsyms the deployed cdylib like any other capability.
+rudroid-linux-sdl-runtime = { path = "../../capability/linux/sdl_runtime" }
+# Creator-thread SDL event injection for opt-in production JNI input acceptance.
+sdl2 = { version = "0.37", default-features = false }
+# Test-only: the ticket-84 stats probe dlopens the deployed cdylib and reads
+# rudroid_elf_load_stats (load-call counters).
+libloading = "0.8"

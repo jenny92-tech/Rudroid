@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-failing-capability"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "Loader test fixture: registers a module subscription in early_init then fails init (ticket 45 failure propagation)"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

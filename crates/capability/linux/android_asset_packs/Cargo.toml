@@ -1,0 +1,13 @@
+[package]
+name = "rudroid-linux-android-asset-packs"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish = false
+
+[lib]
+name = "platform_android_asset_packs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }

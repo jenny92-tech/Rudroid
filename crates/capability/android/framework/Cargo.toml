@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-android-framework"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Guest java.* / android.* framework surface"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "android_base"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-reply-catalog-format = { path = "../reply_catalog/format" }
+serde_json = "1"

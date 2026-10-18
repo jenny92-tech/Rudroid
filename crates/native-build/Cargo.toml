@@ -1,0 +1,14 @@
+[package]
+name = "rudroid-native-build"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Build-script-only fixed GNU C/assembly contract for capability ABI boundaries"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rudroid-vulkan-wsi-builder"
+path = "src/wsi_main.rs"

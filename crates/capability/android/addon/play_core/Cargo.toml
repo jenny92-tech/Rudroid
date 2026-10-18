@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-android-addon-play-core"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Play Core Android Addon proxy surface"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "sdk_google_play_core"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+

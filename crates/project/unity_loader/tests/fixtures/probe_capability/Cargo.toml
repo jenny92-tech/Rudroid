@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-probe-capability"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "Loader CLI test fixture: android_base-kind capability whose init reads the Host Config through Host API v0 and logs it"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

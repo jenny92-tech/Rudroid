@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-test-support"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Dev-only shared test facilities (ticket 81): serial lock, log capture, per-kind module-subscription fake, stub slots"
+
+[lib]
+name = "rudroid_test_support"
+path = "src/lib.rs"
+
+# Deliberately NO [[bin]] and NO descriptor: a plain library that never
+# enters the deploy kit or the production dependency graph (ticket 81).
+# Consumers take it as a dev-dependency only.
+
+[dependencies]
+rudroid-common = { path = "../common" }

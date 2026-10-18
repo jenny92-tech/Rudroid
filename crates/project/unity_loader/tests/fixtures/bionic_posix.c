@@ -1,0 +1,118 @@
+// INPUT:  Android ARM64 public stat/dirent/tm layouts and production POSIX provider
+// OUTPUT:  rudroid_posix_probe verifies native file ownership, time, constants and FP128 ABI
+// POS:    guest uses the same host file descriptor, directory buffer and clock service
+typedef unsigned long U64;
+typedef struct { long tv_sec, tv_nsec; } Time;
+typedef struct {
+    U64 st_dev, st_ino; unsigned st_mode, st_nlink, st_uid, st_gid;
+    U64 st_rdev, pad1; long st_size; int st_blksize, pad2; long st_blocks;
+    Time st_atim, st_mtim, st_ctim; unsigned unused4, unused5;
+} Stat;
+typedef struct { U64 ino; long off; unsigned short reclen; unsigned char type; char name[256]; } Dirent;
+typedef struct { int sec, min, hour, mday, mon, year, wday, yday, isdst; long gmtoff; const char *zone; } Tm;
+extern int fstat(int, Stat *);
+extern int stat(const char *, Stat *);
+extern long pwrite(int, const void *, U64, long);
+extern long lseek(int, long, int);
+extern long read(int, void *, U64);
+extern int close(int);
+extern int open(const char *, int, ...);
+extern void *opendir(const char *);
+extern void *fdopendir(int);
+extern Dirent *readdir(void *);
+extern int closedir(void *);
+extern int strcmp(const char *, const char *);
+extern long sysconf(int);
+extern int getpagesize(void);
+extern U64 getauxval(U64);
+extern int *__errno(void);
+extern int clock_gettime(int, Time *);
+extern int clock_getres(int, Time *);
+extern int nanosleep(const Time *, Time *);
+extern Tm *gmtime_r(const long *, Tm *);
+extern long double strtold(const char *, char **);
+extern long double wcstold(const int *, int **);
+extern int swprintf(int *, U64, const int *, ...);
+extern int strerror_r(int, char *, U64);
+extern char *__gnu_strerror_r(int, char *, U64);
+extern int pipe(int *);
+extern long write(int, const void *, U64);
+extern int ioctl(int, int, ...);
+typedef struct {
+    U64 bsize,frsize,blocks,bfree,bavail,files,ffree,favail,fsid,flag,namemax;
+    unsigned reserved[6];
+} Statvfs;
+extern int statvfs(const char *,Statvfs *), fstatvfs(int,Statvfs *);
+extern long pathconf(const char *,int), fpathconf(int,int);
+extern int __system_property_get(const char *,char *);
+extern const void *__system_property_find(const char *);
+extern int __system_property_read(const void *,char *,char *);
+_Static_assert(sizeof(Stat) == 128 && sizeof(Dirent) == 280 && sizeof(Tm) == 56, "Android LP64 layouts");
+int rudroid_posix_probe(const char *directory, const char *path, int fd) {
+    struct { U64 before; Stat value; U64 after; } metadata = { .before = 71, .after = 82 };
+    if (fstat(fd, &metadata.value) || metadata.value.st_size != 4 || metadata.value.st_blksize <= 0) return 1;
+    if (pwrite(fd, "shared fd", 9, 0) != 9 || lseek(fd, 0, 0) != 0) return 2;
+    char buffer[16] = { 0 };
+    if (read(fd, buffer, 9) != 9 || strcmp(buffer, "shared fd")) return 3;
+    if (stat(path, &metadata.value) || metadata.value.st_size != 9) return 4;
+    if (metadata.before != 71 || metadata.after != 82) return 5;
+    void *dir = opendir(directory);
+    if (!dir) return 6;
+    int found = 0; Dirent *entry;
+    while ((entry = readdir(dir))) if (!strcmp(entry->name, "posix.txt")) found = 1;
+    if (closedir(dir) || !found) return 7;
+    int directory_fd = open(directory, 0);
+    if (directory_fd < 0) return 8;
+    dir = fdopendir(directory_fd);
+    if (!dir || closedir(dir)) return 9;
+    int page = getpagesize();
+    if (page <= 0 || sysconf(0x27) != page || sysconf(0x28) != page || getauxval(6) != (U64)page) return 10;
+    if (sysconf(0x61) <= 0 || sysconf(0x62) <= 0) return 11;
+    *__errno() = 0;
+    if (sysconf(-9999) != -1 || *__errno() != 22) return 12;
+    struct { U64 before; Time value; U64 after; } clock = { .before = 71, .after = 82 };
+    if (clock_gettime(1, &clock.value) || clock.value.tv_nsec < 0 || clock.value.tv_nsec >= 1000000000) return 13;
+    if (clock_getres(1, &clock.value) || clock.before != 71 || clock.after != 82) return 14;
+    Time zero = { 0, 0 };
+    if (nanosleep(&zero, 0)) return 15;
+    struct { U64 before; Tm value; U64 after; } date = { .before = 71, .after = 82 };
+    long epoch = 0;
+    if (gmtime_r(&epoch, &date.value) != &date.value || date.value.year != 70 || date.value.mday != 1) return 16;
+    if (date.before != 71 || date.after != 82) return 17;
+    union { long double value; U64 bits[2]; } quad;
+    char *end;
+    quad.value = strtold("2.0!", &end);
+    if (*end != '!' || quad.bits[0] || quad.bits[1] != 0x4000000000000000UL) return 18;
+    quad.value = wcstold(L"2.0", 0);
+    if (quad.bits[0] || quad.bits[1] != 0x4000000000000000UL) return 19;
+    int wide[16];
+    if (swprintf(wide, 16, L"%ls:%ld", L"wide", 42L) != 7 || wide[5] != '4' || wide[6] != '2' || wide[7]) return 20;
+    struct { U64 before; Statvfs value; U64 after; } fs = { .before=71,.after=82 };
+    if (statvfs(directory,&fs.value) || !fs.value.bsize || !fs.value.namemax || fs.before!=71 || fs.after!=82) return 30;
+    U64 block=fs.value.bsize;
+    if (fstatvfs(fd,&fs.value) || fs.value.bsize!=block || fs.before!=71 || fs.after!=82) return 31;
+    if (pathconf(directory,4)<=0 || fpathconf(fd,0)<=0) return 32; // Android NAME_MAX / FILESIZEBITS.
+    if (pathconf(directory,9999)!=-1 || *__errno()!=22) return 33;
+    struct { char before,name[32],value[92],after; } prop={.before=71,.after=82};
+    if (__system_property_get("ro.product.cpu.abi",prop.value)!=9 || strcmp(prop.value,"arm64-v8a")) return 34;
+    const void *info=__system_property_find("ro.product.cpu.abi");
+    if (!info || info!=__system_property_find("ro.product.cpu.abi") || __system_property_read(info,prop.name,prop.value)!=9) return 35;
+    if (strcmp(prop.name,"ro.product.cpu.abi") || strcmp(prop.value,"arm64-v8a")) return 36;
+    if (__system_property_get("swappy.disable",prop.value)!=1 || strcmp(prop.value,"1")) return 37;
+    if (__system_property_find("unknown") || __system_property_get("unknown",prop.value) || prop.value[0] || prop.before!=71 || prop.after!=82) return 38;
+    if (close(fd)) return 21;
+    struct { char before, value[2], after; } error = { .before = 71, .after = 82 };
+    *__errno() = 73;
+    if (strerror_r(2, error.value, 2) != 34 || error.value[1] || error.before != 71 || error.after != 82 || *__errno() != 73) return 22;
+    if (__gnu_strerror_r(2, error.value, 2) != error.value || error.value[1] || *__errno() != 73) return 23;
+    if (strerror_r(2, 0, 0) != 34 || *__errno() != 73) return 24;
+    char unknown[128];
+    if (strerror_r(99999, unknown, sizeof(unknown)) || strcmp(unknown, "Unknown error 99999") || *__errno() != 73) return 25;
+    int pipes[2];
+    if (pipe(pipes) || write(pipes[1], "abc", 3) != 3) return 26;
+    struct { int before, value, after; } available = { 71, 0, 82 };
+    if (ioctl(pipes[0], 0x541b, &available.value) || available.value != 3 || available.before != 71 || available.after != 82) return 27; // FIONREAD.
+    if (ioctl(pipes[0], -1, 0) != -1 || *__errno() != 25) return 28; // ENOTTY, no fake success.
+    if (close(pipes[0]) || close(pipes[1])) return 29;
+    return 0;
+}

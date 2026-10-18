@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-common"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Shared types and discovery conventions with no Android/SDL assumptions"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# arm64_detour (ticket 87 Phase A): cache maintenance + W^X patching.
+libc = "0.2"
+
+[build-dependencies]
+rudroid-native-build = { path = "../native-build" }

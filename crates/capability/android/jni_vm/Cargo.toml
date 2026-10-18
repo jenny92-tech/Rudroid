@@ -1,0 +1,20 @@
+[package]
+name = "rudroid-android-jni-vm"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Guest fake JNI VM capability"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "android_jni_vm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-reply-catalog-format = { path = "../reply_catalog/format" }
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

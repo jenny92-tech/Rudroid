@@ -1,0 +1,37 @@
+--- a/wsi/wayland/swapchain.cpp
++++ b/wsi/wayland/swapchain.cpp
+@@ -411,7 +411,13 @@
+ 
+    assert(image.data != nullptr);
+    auto image_data = static_cast<wayland_image_data *>(image.data);
+-   TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
++   // The first native GBM allocation also supplies the image's exact modifier
++   // layout. Reuse it here; do not reserve or leak a second buffer for a query.
++   if (!image_data->memory_allocated)
++   {
++      TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
++      image_data->memory_allocated = true;
++   }
+    image_status_lock.unlock();
+ 
+    TRY_LOG(create_wl_buffer(image_create_info, image, image_data), "Failed to create wl_buffer");
+@@ -461,7 +467,8 @@
+       }
+ 
+       wsialloc_format allocated_format = { 0 };
+-      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, true));
++      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, false));
++      image_data->memory_allocated = true;
+ 
+       for (auto &prop : drm_format_props)
+       {
+--- a/wsi/wayland/swapchain.hpp
++++ b/wsi/wayland/swapchain.hpp
+@@ -57,6 +57,7 @@
+ 
+    external_memory external_mem;
+    wl_buffer *buffer;
++   bool memory_allocated{ false };
+    sync_fd_fence_sync present_fence;
+ };
+ 

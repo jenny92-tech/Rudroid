@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-audio-policy-capability"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "Loader test fixture: platform capability whose early init registers the reference SDL audio policy through the Host API (ticket 55)"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+name = "platform_audio_sdl"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

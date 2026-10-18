@@ -1,0 +1,13 @@
+[package]
+name = "rudroid-unity-player-lifecycle"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Shared Unity player lifecycle for engine profile capabilities (plain library, no descriptor)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rudroid-common = { path = "../../../common" }

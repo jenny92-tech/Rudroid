@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-android-media-fallback"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional typed NDK media failure boundary for hosts without a decoder"
+
+[lib]
+name = "android_media_fallback"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

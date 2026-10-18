@@ -1,0 +1,73 @@
+[paths]
+
+game_files="./gamedata/"
+support_files="./gamedata/"
+
+android_package_code="./"
+android_external_files="../conf/"
+android_files="../conf/"
+android_cache="../cache/"
+android_obb_dirs=["./gamedata/"]
+android_source_dirs=["./gamedata/"]
+
+
+[package]
+
+packageName="com.game.silksong"
+versionName="1.1.5"
+mainIntentBundle = { unity = "" }
+
+[device]
+displayWidth=960
+displayHeight=720
+displayRotation=0
+
+
+[input]
+controller=true
+
+dpad_synthesize_hat = false
+
+[input.remap]
+a = "BUTTON_A"
+b = "BUTTON_B"
+x = "BUTTON_X"
+y = "BUTTON_Y"
+start = "BUTTON_START"
+select = "BUTTON_SELECT"
+
+[unity]
+render_sleep_us = 0
+frame_sync_interval_us = 16667
+signal_vsync_before_render = false
+
+[sdk_fmod]
+clocked_audio_pump = false
+reuse_last_valid_format = true
+
+[gpu]
+glVersionOverride = "OpenGL ES 3.2 Rudroid"
+glMajorVersionOverride = 3
+glMinorVersionOverride = 2
+glExtensionsRemove = "GL_EXT_color_buffer_float GL_EXT_color_buffer_half_float"
+disableFramebufferInvalidate = true
+disableProgramBinary = true
+disableScreenRefraction = true
+skipDisabledShaderDraws = true
+
+[game_patches.silksong_unity6]
+disable_touch_camera = true
+disable_touch_controls = true
+disable_watermark_canvas = true
+destroy_bootstrap_objects = true
+freeze_decorative_behaviours = true
+decorative_sprite_percent = 50
+disable_ambient_particles = true
+disable_heavy_postprocess = true
+resource_census = false
+unload_unused_assets_after_prune = false
+unload_assetbundles_after_title = false
+assetbundle_unload_delay_frames = 180
+disable_audio_preloader = true
+trace_resource_load_methods = false
+trace_audio_clip_records = false

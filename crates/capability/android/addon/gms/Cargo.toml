@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-android-addon-gms"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "GMS Android Addon task listener proxy surface"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "sdk_google_gms"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+

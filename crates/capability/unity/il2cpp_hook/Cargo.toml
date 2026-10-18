@@ -1,0 +1,36 @@
+[package]
+name = "rudroid-unity-il2cpp-hook"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Config-driven IL2CPP hook mechanism capability"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "il2cpp_patch"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-host-config = { path = "../../../common/host-config" }
+libc = "0.2"
+
+# Ticket 81 rework: valid never-called slot fillers from the shared
+# dev-only crate (test-support has no descriptor, so it cannot collide on
+# the capability descriptor export the way a second capability rlib would).
+[dev-dependencies]
+rudroid-test-support = { path = "../../../test-support" }
+
+# Ticket 51: the detour integration exercise elf_load's executable backend
+# through its C API via dlopen (RUDROID51_ELF_LOAD_SO) instead of a
+# dev-dependency: two capability rlibs in one test binary would collide on
+# the shared `rudroid_plugin_descriptor` export (ticket-43 boundary), and
+# dynamic loading is the deployment topology anyway.
+
+# The detour fixture is a self-contained binary (custom main for the
+# child-process probes), so it needs a non-harness test target.
+[[test]]
+name = "detour_fixture"
+harness = false

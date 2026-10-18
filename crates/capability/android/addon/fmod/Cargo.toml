@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-android-addon-fmod"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "FMOD Android Addon stub bridge"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "sdk_fmod"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+
+

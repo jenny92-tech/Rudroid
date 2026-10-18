@@ -1,0 +1,180 @@
+Rudroid Noncommercial Source-Share License
+Version 1.0
+Identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
+
+This is a custom noncommercial source-available license. It is not an
+OSI-approved open-source license. It applies to Rudroid's first-party
+material; identified third-party components retain their own licenses.
+
+1. Definitions
+
+"Licensor" means each copyright holder offering material under this
+license. "You" means the individual or legal entity exercising a right
+granted by this license. An entity's use includes use performed on its
+behalf by its employees, contractors, or agents.
+
+"Covered Work" means material expressly offered under this license and
+your modifications, adaptations, and other copyright-derived versions
+of that material. It includes source and compiled forms. It does not
+automatically include independent works merely distributed alongside it,
+independent guest programs or assets it loads, or outputs that contain
+no copyright-protected material from the Covered Work.
+
+"Commercial Use" means using, modifying, reproducing, distributing, or
+providing the Covered Work in business operations or for revenue,
+financial compensation, commercial advantage, or anticipated profit.
+This includes selling or renting it; including it in paid hardware,
+software, subscriptions, or services; commercial hosting or deployment;
+advertising-funded or otherwise monetized services using it; and using
+it to perform work for a business or paying customer. Making the Covered
+Work available free of charge does not make an otherwise commercial
+activity noncommercial.
+
+"Corresponding Source" means the complete, preferred editable form of
+the Covered Work needed to understand, modify, build, install, and run
+the version you distribute or provide over a network. It includes all
+your changes, required interface definitions, project-specific scripts,
+build and installation instructions, and configuration templates. An
+obfuscated, encrypted, incomplete, or machine-generated substitute for
+the preferred editable source does not satisfy this definition.
+
+Corresponding Source need not include personal data, credentials, signing
+secrets, independent guest programs or assets, or ordinary unmodified
+operating-system components, general-purpose tools, and independent
+third-party dependencies obtainable separately. Identify necessary
+dependencies and provide sufficient instructions to obtain and use them.
+Excluding secrets does not excuse withholding implementation changes:
+provide placeholders and configuration instructions instead.
+
+2. Conditional copyright permission
+
+Subject to every condition of this license, each Licensor grants you a
+worldwide, nonexclusive, royalty-free permission to use, reproduce,
+modify, and distribute its Covered Work solely for noncommercial
+purposes. Personal study, hobby use, and research or education with no
+commercial purpose are examples of permitted uses.
+
+Commercial Use is prohibited. This license grants no commercial
+permission, including for internal business use or paid deployment.
+It does not grant rights a Licensor does not own or have authority to
+license. Statutory rights that do not require the Licensor's permission,
+including applicable fair-use rights, are not restricted by this license.
+
+3. Same-license requirement
+
+If you distribute a modified or other derived version of the Covered
+Work, or allow third parties to use that version over a network, offer
+the entire Covered Work in that version under this exact license.
+Your own contributions to that version must carry the same grant and
+conditions. Preserve the noncommercial restriction and the source-sharing
+obligations. You may not replace them with a more permissive license or
+add conditions that prevent recipients from exercising the permissions
+this license grants.
+
+This requirement applies to the Covered Work and your derived changes;
+it does not relicense independent third-party material. You may not
+distribute a combination whose other applicable terms make compliance
+with this license impossible. Obtain compatible permission or exclude
+the incompatible material before distributing the combination.
+
+4. Public source when distributing
+
+Whenever you distribute any Covered Work, including a modified version
+or a compiled binary, make the Corresponding Source for that exact
+version publicly downloadable under this license. Identify the matching
+version or commit and provide a prominent source location with the
+distribution. Providing only an upstream version that omits your changes
+does not satisfy this condition.
+
+The source must be available without a fee, registration requirement,
+individual approval, or confidentiality obligation, in a commonly usable
+format that recipients can retain. Include this license and all required
+notices. Keep the source available while you distribute that version and
+for at least three years after your last distribution of it.
+
+5. Public source when providing network access
+
+If you provide third parties with access to functionality of the Covered
+Work over a network, provide a prominent, readily accessible link to the
+Corresponding Source of the running version, including your changes.
+The same publication, license, access, and retention conditions in
+section 4 apply, with retention lasting at least three years after you
+last provide access to that version.
+
+This section does not authorize a commercial service. Commercial Use
+remains prohibited even when all source is published. Private local
+modifications that you neither distribute nor provide to third parties
+over a network do not by themselves require publication.
+
+6. Notices and identification
+
+Preserve existing copyright, license, attribution, and disclaimer
+notices in the Covered Work. Include this license and the project's
+NOTICE file with source and binary distributions. Carry all lines
+beginning "Required Notice:" into redistributed copies and their source
+bundles. Mark modifications clearly and identify their authors and
+matching source version. Do not imply endorsement by the original
+authors or claim an official Rudroid release for your modified version.
+
+No trademark rights are granted. Altering the license document or its
+identifier does not change the terms governing material you received
+under this license.
+
+7. Limited patent permission
+
+Each Licensor grants you a worldwide, nonexclusive, royalty-free patent
+permission only for patent claims it controls that are necessarily
+infringed by exercising the permissions expressly granted for its
+contribution. This permission is limited to uses that comply with this
+license. If you initiate a patent claim alleging that the Covered Work
+or a contribution infringes a patent, this patent permission terminates
+for you when that claim is initiated.
+
+8. Contributions
+
+When you knowingly submit original material for inclusion in a project
+that identifies this license as its contribution policy, you offer that
+material under this exact license. You must have authority to provide
+the copyright and patent permissions involved. No copyright assignment
+is implied. Identify third-party material and its actual license;
+submission does not relicense it or cure an incompatibility.
+
+9. Violations and termination
+
+The permissions granted to you automatically terminate if you violate
+these terms. If this is your first violation, you cease the violation,
+and you fully correct it within 30 days after receiving written notice,
+your permissions are reinstated unless the relevant Licensor informs
+you otherwise in writing. Other reinstatement requires that Licensor's
+written permission. Correction does not retroactively authorize a past
+Commercial Use or waive claims arising from a violation.
+
+Termination does not terminate the permissions of recipients who
+independently comply with this license. Ending distribution or deleting
+your copy does not remove the source-retention obligations already
+incurred under sections 4 and 5.
+
+10. No warranty; limitation of liability
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE COVERED WORK IS PROVIDED
+"AS IS", WITHOUT WARRANTIES, INCLUDING WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, OR NONINFRINGEMENT. NO LICENSOR OR
+CONTRIBUTOR IS LIABLE FOR DAMAGES ARISING FROM THE COVERED WORK OR THIS
+LICENSE, INCLUDING LOST DATA, LOST PROFITS, BUSINESS INTERRUPTION, OR
+INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES.
+
+11. Scope and version
+
+Rights not expressly granted are reserved. Only this exact version
+applies; publication of a later license does not automatically replace
+the terms of material already received under this version. Previously
+granted rights under other licenses are not revoked by this document.
+Nothing here permits removing an earlier third-party license or adding
+noncommercial restrictions to material received under an incompatible
+license without the necessary copyright holders' separate permission.
+
+Acknowledgements
+
+Thanks to binarycounter and the Bogodroid contributors for laying the foundation
+for Rudroid.
+Upstream project: https://github.com/binarycounter/Bogodroid

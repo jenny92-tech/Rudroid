@@ -1,0 +1,15 @@
+[package]
+name = "rudroid-vulkan-wsi-allocator"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Native GBM DMA-BUF allocator for the optional upstream Vulkan WSI layer"
+
+[lib]
+name = "rudroid_vulkan_wsi_allocator"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+libloading = "0.8"

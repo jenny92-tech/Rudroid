@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-android-addon-xlua"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "xlua guest mapping stub"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "sdk_xlua"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-android-addon-after-unity-module = { path = "../after_unity_module" }
+rudroid-common = { path = "../../../../common" }

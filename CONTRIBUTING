@@ -1,0 +1,19 @@
+Rudroid contribution policy
+
+First-party contributions use the Rudroid Noncommercial Source-Share License
+1.0 in the root LICENSE. Commercial use is prohibited; distribution or network
+access requires public corresponding source and the same terms for derivatives.
+By knowingly submitting a contribution for inclusion, you offer your original
+material under those terms. You retain copyright; no assignment is implied.
+You must have authority to provide the applicable copyright and patent rights.
+
+For reused code and dependencies, identify their original source, version,
+copyright holders, license and modifications. Preserve their original notices
+and verify compatibility before inclusion. A reference to another implementation
+is not permission to copy its protected code. Do not relabel third-party GPL
+material as noncommercial without the necessary copyright permission.
+
+Before distributing binaries or providing network access, prepare the matching
+complete source, build instructions, LICENSE, NOTICE and THIRD-PARTY-NOTICES,
+including optional native dependency notices. Provide the public source location
+required by LICENSE. Private local modifications do not have to be published.

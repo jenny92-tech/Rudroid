@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-hooks-capability"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../LICENSE"
+publish = false
+description = "Loader test fixture (ticket 53): platform capability whose register-JNI phase registers the reference Android runtime hooks (flush preferences + signal vsync) through the Host API"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+name = "android_hooks_fixture"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../../common" }

@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-unity-profile-2021-3"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Unity 2020-2021.3 engine profile capability"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "unity_2021_3"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-unity-player-lifecycle = { path = "../player_lifecycle" }
