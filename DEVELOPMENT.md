@@ -84,9 +84,12 @@ GC-handle ABI 只用精确证据；HUD 的受限缺 getter 回退不能扩大旧
 |---|---|
 | 芯片 64 位就能用 ARM64 kit | 检查用户态与实际依赖 ELF；架构、GLIBC、页大小和驱动分别确认。 |
 | SDL 有 driver 或 Docker Mesa 通过就算能用 | 实机确认窗口/context/present、输出与 guest 尺寸、声音和输入。 |
+| 原生 EGL swap 成功就代表屏幕更新 | 主窗口通过 SDL 绑定并交换；KMSDRM 还需要 SDL 的 GBM/DRM page flip。worker pbuffer 保留原生 EGL，切换时同步 SDL 的线程绑定，不能叠加两次 swap。 |
+| GPU 支持 Vulkan 就能切后端 | 当前 Vulkan WSI 仅支持 Wayland；KMSDRM 上即使原生实例和 GPU 探测成功也不可选，不复制其他固件驱动或绕过启动门禁。 |
 | 配置能解析就代表功能可用 | 跟到消费者与实际执行；当前支持范围查[能力表](crates/docs/MIGRATION-MAP.md)。 |
 | 统一前缀只是文字替换 | 核对所有导出及内部 native linker 名；zlib 的公开 resolver 与内部 C 查询必须分名，避免错误绑定成递归。ELF 夹具的名称长度、字符串表大小与偏移也要同步。 |
 | mmap hint 就是可用跳板页 | 指定页只用 MAP_FIXED_NOREPLACE 并核对返回地址；失败不得覆盖已有映射。 |
+| 再加一套按键映射更兼容 | Rudroid 已拥有原生游戏输入与 Select+Start 退出；游戏阶段不能叠加 gptokeyb，否则可能重复暂停，并在原生清理完成前被外部强杀。设置 UI 的映射仍限于 UI 进程。 |
 | 已有数字按钮就是完整手柄 | 核对名称/ID/厂商、轴/range、扳机、HAT、remap、热插拔释放与各标题操作；Android Build 默认 Rudroid 避免误选 Linux 布局。 |
 | nativeRender 返回就是游戏帧 | 看标题、菜单和关卡，确认移动、声音、保存/重读、退出与新进程启动。首帧前 false 可重试；运行后 false 表示引擎停止，不能再按 20,000 次启动重试处理。游戏菜单退出与 Select+Start 分开验证。 |
 | 拦截 Application.Quit 只影响 Android 启动器 | 全局拦截也会吞掉正常菜单退出。丝之歌游戏逻辑在 Silksong.dll；按钮之后的 GameManager.QuitGame 协程仍需处理。仅在完整元数据校验的 UI/MoveNext 原调用链内放行，作用域跨异常恢复、不在帧间保留许可；不能全局关闭拦截而让启动期请求提前结束游戏。 |

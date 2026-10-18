@@ -1,5 +1,5 @@
 //! INPUT:  one live SDL GLES session and the native EGL driver
-//! OUTPUT:  shared EGL/GLES/ANativeWindow source, context/surface lifecycle and swap notifications
+//! OUTPUT:  shared EGL/GLES/ANativeWindow source, SDL window presentation and worker EGL lifecycle
 //! POS:    Android graphics entry points backed by the existing Linux window; no second window or driver state
 //!
 //! Linux ARM64 guest/host EGL and GLES use the same C ABI. GL calls return
@@ -31,7 +31,9 @@ const FALSE: Bool = 0;
 const SUCCESS: i32 = 0x3000;
 const NOT_INITIALIZED: i32 = 0x3001;
 const BAD_CONFIG: i32 = 0x3005;
+const BAD_CURRENT_SURFACE: i32 = 0x3007;
 const BAD_DISPLAY: i32 = 0x3008;
+const BAD_MATCH: i32 = 0x3009;
 const BAD_PARAMETER: i32 = 0x300c;
 const CONFIG_ID: i32 = 0x3028;
 const NONE: i32 = 0x3038;
@@ -155,6 +157,9 @@ struct Resources {
 
 pub(crate) struct Graphics {
     driver: Driver,
+    // Borrowed from SdlSession; the window outlives all guest calls. SDL owns
+    // its native surface and, on KMSDRM, the GBM/DRM page-flip bookkeeping.
+    window: usize,
     display: usize,
     context: usize,
     surface: usize,
@@ -212,7 +217,7 @@ impl FrameCapture {
         self.take_due(swap,self.started.map(|start|start.elapsed().as_millis()).unwrap_or(0))
     }
     unsafe fn read(&self, g:&Graphics) -> Option<Vec<u8>> {
-        if (g.driver.current_surface)(0x305a) as usize!=g.surface || (g.driver.current_context)().is_null(){return None;}
+        if !g.primary_current(){return None;}
         let version=g.resolve(c"glGetString");if version==0{return None;}
         let version:unsafe extern "C" fn(u32)->*const c_char=std::mem::transmute(version);
         let version=version(0x1f02);if version.is_null() || !CStr::from_ptr(version).to_bytes().starts_with(b"OpenGL ES 3"){return None;}
@@ -290,15 +295,17 @@ impl Graphics {
             return Err("a guest graphics session is already active".into());
         }
         let driver = Driver::load()?;
-        // SAFETY: EGL current-state queries have no preconditions.
-        let (display, context, surface) = unsafe {
+        // SAFETY: SDL/EGL current-state queries have no preconditions; our
+        // activation contract keeps the creator-owned window and context live.
+        let (window, display, context, surface) = unsafe {
             (
+                sdl2::sys::SDL_GL_GetCurrentWindow(),
                 (driver.current_display)(),
                 (driver.current_context)(),
                 (driver.current_surface)(DRAW),
             )
         };
-        if display.is_null() || context.is_null() || surface.is_null() {
+        if window.is_null() || display.is_null() || context.is_null() || surface.is_null() {
             return Err(
                 "SDL GLES session has no current native EGL display/context/window surface".into(),
             );
@@ -376,6 +383,7 @@ impl Graphics {
         eprintln!("[SDL] framebuffer invalidation policy: disabled={disable_invalidation}");
         let graphics = Arc::new(Self {
             driver,
+            window: window as usize,
             display: display as usize,
             context: context as usize,
             surface: surface as usize,
@@ -473,13 +481,20 @@ impl Graphics {
 
     pub(crate) fn dimensions(&self)->RenderDimensions {self.dimensions}
 
+    fn primary_current(&self)->bool {
+        // SAFETY: thread-local SDL/EGL binding queries have no preconditions;
+        // the window and native library remain pinned until guest quiescence.
+        unsafe {
+            if sdl2::sys::SDL_GL_GetCurrentWindow() as usize!=self.window
+                || (self.driver.current_context)() as usize!=self.context { return false; }
+            let draw=(self.driver.current_surface)(DRAW);
+            !draw.is_null() && draw==(self.driver.current_surface)(0x305a)
+        }
+    }
+
     fn primary_scale(&self)->Option<&RenderScale> {
         let scale=self.scale.as_ref()?;
-        // SAFETY: EGL current-binding queries have no preconditions; libraries remain pinned.
-        let primary=unsafe {(self.driver.current_context)() as usize==self.context
-            && (self.driver.current_surface)(DRAW) as usize==self.surface
-            && (self.driver.current_surface)(0x305a) as usize==self.surface};
-        primary.then_some(scale)
+        self.primary_current().then_some(scale)
     }
 
     fn resolve(&self, name: &CStr) -> usize {
@@ -997,8 +1012,37 @@ unsafe extern "C" fn make_current(
     if g.scale.is_some() && context as usize==g.context && (draw as usize==g.surface)!=(read as usize==g.surface) {
         return fail(0x3009,FALSE); // Mixed window/pbuffer bindings cannot represent one scaled default framebuffer.
     }
-    // SAFETY: validated display; EGL rejects unknown draw/read/context handles.
-    let result=unsafe { (g.driver.make_current)(display, draw, read, context) };
+    // SAFETY: the session pins its SDL window. Binding a window context is
+    // allowed on the guest render thread after the previous owner releases it.
+    // Worker handles remain native EGL handles, validated by the driver.
+    let result=unsafe {
+        if !context.is_null() && draw as usize==g.surface && read as usize==g.surface {
+            if sdl2::sys::SDL_GL_MakeCurrent(g.window as *mut _, context)==0 { TRUE }
+            else {
+                // SDL may consume EGL's error while formatting its own error.
+                let error=(g.driver.error)();
+                fail(if error==SUCCESS { BAD_MATCH } else { error }, FALSE)
+            }
+        } else {
+            let previous_window=sdl2::sys::SDL_GL_GetCurrentWindow();
+            let previous_context=sdl2::sys::SDL_GL_GetCurrentContext();
+            if !previous_window.is_null()
+                && sdl2::sys::SDL_GL_MakeCurrent(std::ptr::null_mut(), std::ptr::null_mut())!=0 {
+                fail(BAD_MATCH, FALSE)
+            } else {
+                let result=(g.driver.make_current)(display, draw, read, context);
+                if result==FALSE && !previous_window.is_null() {
+                    let error=(g.driver.error)();
+                    // A rejected worker bind must preserve the old current
+                    // window/context as well as its original EGL error.
+                    if sdl2::sys::SDL_GL_MakeCurrent(previous_window, previous_context)==0 {
+                        ERROR.with(|slot|slot.set(error));
+                    }
+                }
+                result
+            }
+        }
+    };
     if result==TRUE {
         // SAFETY: successful native context binding; driver query buffers are owned and bounded.
         unsafe{shader_gl::refresh_binding(&g,None);}
@@ -1023,9 +1067,15 @@ unsafe extern "C" fn current_context() -> Handle {
     })
 }
 unsafe extern "C" fn current_surface(which: i32) -> Handle {
-    // SAFETY: EGL current-state query, no preconditions.
+    // SAFETY: SDL/EGL current-state queries have no preconditions. The guest
+    // window token stays stable even if SDL replaces its native EGL surface.
     active().map_or(std::ptr::null_mut(), |g| unsafe {
-        (g.driver.current_surface)(which)
+        if matches!(which, DRAW | 0x305a)
+            && sdl2::sys::SDL_GL_GetCurrentWindow() as usize==g.window {
+            g.surface as Handle
+        } else {
+            (g.driver.current_surface)(which)
+        }
     })
 }
 unsafe extern "C" fn query_surface(
@@ -1080,8 +1130,21 @@ unsafe extern "C" fn swap(display: Handle, surface: Handle) -> Bool {
             unsafe {scale.present();}
         }
     }
-    // SAFETY: validated display; EGL rejects unknown surface handles.
-    let result = unsafe { (g.driver.swap)(display, surface) };
+    // SAFETY: the session pins its SDL window. Only a thread with that window
+    // current may present it. SDL performs the one EGL swap plus the native
+    // backend's presentation work; pbuffers retain their native EGL path.
+    let result = unsafe {
+        if surface as usize==g.surface {
+            if sdl2::sys::SDL_GL_GetCurrentWindow() as usize!=g.window {
+                fail(BAD_CURRENT_SURFACE, FALSE)
+            } else {
+                sdl2::sys::SDL_GL_SwapWindow(g.window as *mut _);
+                TRUE
+            }
+        } else {
+            (g.driver.swap)(display, surface)
+        }
+    };
     if result == TRUE && surface as usize == g.surface {
         let swaps=g.swaps.fetch_add(1, Ordering::Relaxed)+1;
         if let (Some(capture),Some((index,pixels)))=(&g.capture,captured){capture.write(&g,&pixels,swaps,index);}
@@ -1136,7 +1199,11 @@ unsafe extern "C" fn release_thread() -> Bool {
     // SAFETY: eglReleaseThread has no preconditions.
     let result = active().map_or(TRUE, |g| {
         // SAFETY: current-state query and release on the calling thread; no guest pointer.
-        unsafe {let previous=(g.driver.current_context)() as usize;let result=(g.driver.release_thread)();
+        unsafe {let previous=(g.driver.current_context)() as usize;
+            if !sdl2::sys::SDL_GL_GetCurrentWindow().is_null() {
+                sdl2::sys::SDL_GL_MakeCurrent(std::ptr::null_mut(),std::ptr::null_mut());
+            }
+            let result=(g.driver.release_thread)();
             if result==TRUE && g.resources.lock().unwrap().retired_contexts.remove(&previous){shader_gl::forget_context(previous);g.capture_errors.lock().unwrap().remove(&previous);}
             result}
     });

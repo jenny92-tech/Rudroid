@@ -5,6 +5,14 @@
 有边界的[实机验收](ACCEPTANCE.md)；不能据此声称已在 GLIBC 2.28、R36S 或所有固件运行。
 必要的 ABI/装载陷阱见[开发规范](../../DEVELOPMENT.md#已知适配陷阱)。
 
+2026-10-19 另在 TrimUI 的 Allwinner A523 / Mali-G57 / 986008 KiB RAM /
+Buildroot 2022.05、GLIBC 2.33 上检查。设备树与真实库优先于 PortMaster 中旧的
+A133plus 名称：SDL 2.32.6 使用 KMSDRM，原生输出 1280×720。
+主窗口须由 SDL 完成交换及 page flip，不能只调用原生 `eglSwapBuffers`。
+系统 SDL 未编译 PulseAudio backend，启动器沿用 ALSA 的 Pulse 插件连接现有声卡服务。
+该驱动能创建 Vulkan 1.2 实例并枚举 GPU，但缺当前 Rudroid 所需的 Wayland 呈现会话；
+Vulkan 不可选，保留 GLES。具体标题、内存及验收边界见[验收](ACCEPTANCE.md)。
+
 ## 系统要求
 
 | 层 | 当前处理 | 未支持或仍需验证 |

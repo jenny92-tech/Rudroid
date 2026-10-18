@@ -5,7 +5,8 @@
 ## Role
 
 Contains Rudroid's Android, Linux and Unity capabilities and the thin loader.
-Current bounded acceptance covers five MiniLoong titles ([scope](docs/ACCEPTANCE.md));
+Current bounded acceptance covers five MiniLoong and TrimUI/A523 GLES titles
+([scope and 1 GiB limits](docs/ACCEPTANCE.md));
 Host Config TOML stays compatible with existing launchers. The sibling Bogodroid
 C++ tree is a read-only behavioral reference, not a build dependency.
 Terms: [CONTEXT](../CONTEXT.md); comparison rules: [REFERENCE](docs/REFERENCE.md).

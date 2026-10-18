@@ -7,7 +7,9 @@ Rust compatibility runtime for ARM64 Android Unity libraries on ARM64 Linux.
 Implementation lives in `crates/`; offline resource preparation lives in `tools/`.
 The sibling Bogodroid C++ tree is a read-only behavior reference, not a dependency.
 Read the [documentation index](docs/README.md), then the relevant module's AGENTS.
-Current acceptance covers five bounded MiniLoong title paths, not ARM32 or Mono.
+Current acceptance covers five bounded MiniLoong and TrimUI/A523 GLES title paths;
+TrimUI has 1 GiB memory limits and no supported Vulkan presentation. ARM32 and Mono
+remain unverified.
 
 ## Design
 

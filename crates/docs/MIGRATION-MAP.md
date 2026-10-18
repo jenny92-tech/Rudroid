@@ -72,11 +72,11 @@ NOW|LOCAL 加载，防止 symlink 逃逸/重入；返回函数地址在 guest cl
 | 分类 | 当前边界 |
 |---|---|
 | 架构与引擎 | ARM32、Mono、其他引擎执行后端未实现；ICEY 不能从存在 DLL 或共享 JNI 推导可运行。 |
-| Vulkan | 可选 `--vulkan` SDL 后端已有 Android→Wayland、原生函数与 GBM DMA-BUF 桥接；MiniLoong 上丝之歌和吸血鬼幸存者已有有界玩法及退出验收。支持原生尺寸和已验证的 Wayland 线性缩放，保留 GLES 默认；其他设备、游戏及完整 shader 覆盖另验。见 [运行策略](RUNTIME-POLICY.md#可选-vulkan-后端)及 [Vulkan 核验](../../docs/REFERENCES.md#vulkan)。 |
+| Vulkan | 可选 `--vulkan` SDL 后端已有 Android→Wayland、原生函数与 GBM DMA-BUF 桥接；MiniLoong 上丝之歌和吸血鬼幸存者已有有界玩法及退出验收。支持原生尺寸和已验证的 Wayland 线性缩放，保留 GLES 默认；TrimUI/A523 的 KMSDRM 固件没有可用的 Vulkan 呈现，菜单禁止选择。其他设备、游戏及完整 shader 覆盖另验。见 [运行策略](RUNTIME-POLICY.md#可选-vulkan-后端)及 [Vulkan 核验](../../docs/REFERENCES.md#vulkan)。 |
 | 动态链接 / native ABI | 自动 DT_NEEDED 发现、完整 ELF TLS、任意新文件 dlopen、RTLD_NEXT/guest-local namespace、Android TCB、process-shared 同步与线程取消未建立；逐项失败，不能裸 dlsym 到宿主。 |
 | Java / Android | 没有完整 JVM/Java TLS/传感器/视频后端或真正 Google 在线服务。system CA 导出不等于 Java TLS runtime；广告失败/跳过策略不算在线适配缺口。 |
 | 丝之歌可选项 | optional Destroy、prune 后额外 UnloadUnusedAssets、资源 census/method/audio traces 尚无运行消费者；已实现停用不等于 Destroy。标题 AssetBundle 卸载默认关闭，当前游戏效果未验收。签名检查绕过不提供。 |
 | 参考诊断/时序 | 未提供 `platform_thread_trace`、HK 部分日志 wrapper；帧节奏由 target_fps/render sleep/vsync 控制，不启用参考实现的固定地址 frame-sync worker。诊断与时序差异不能直接算功能或性能回退。 |
-| 设备验收 | 五标题短程范围之外的全玩法、所有实体控制器、物理热插拔、长期稳定性、1 GiB/其他固件与公平性能对照需另验收；不是这些路径均缺实现。 |
+| 设备验收 | MiniLoong 与 TrimUI/A523 已完成五标题短程路径；1 GiB 下丝之歌/吸血鬼仍有显著换页与加载停顿。全玩法、所有实体控制器、物理热插拔、长期稳定性、其他固件与公平性能对照需另验收。 |
 
 更新本表时同时查配置读取、注册/事件和实际调用方，不使用名称计数或历史缺口清单代替源码 review。

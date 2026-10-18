@@ -337,6 +337,17 @@ pub(crate) fn exercise(session: &mut crate::window::SdlSession) -> Weak<Graphics
         assert_eq!(make_current(display, surface, surface, ctx), TRUE);
         assert_eq!(current_context(), ctx);
         assert_eq!((g.driver.current_context)(), ctx);
+        assert_eq!(sdl2::sys::SDL_GL_GetCurrentWindow() as usize, g.window,
+            "SDL must own presentation, including native KMSDRM page flips");
+        assert_eq!(sdl2::sys::SDL_GL_GetCurrentContext(), ctx);
+        assert_eq!(current_surface(DRAW), surface);
+        // A legal handle pair with an incompatible read surface must fail
+        // without losing either native EGL or SDL's previous binding.
+        assert_eq!(make_current(display, surface, std::ptr::null_mut(), ctx), FALSE);
+        assert_eq!(get_error(), BAD_MATCH);
+        assert_eq!(current_context(), ctx);
+        assert_eq!(current_surface(DRAW), surface);
+        assert_eq!(sdl2::sys::SDL_GL_GetCurrentWindow() as usize, g.window);
         let mut width = 0;
         assert_eq!(query_surface(display, surface, 0x3057, &mut width), TRUE);
         assert_eq!(width, expected_width);
@@ -410,6 +421,16 @@ pub(crate) fn exercise(session: &mut crate::window::SdlSession) -> Weak<Graphics
         let worker = create_context(display, config, ctx, [0x3098, 3, NONE].as_ptr());
         let pbuffer = create_pbuffer(display, config, [0x3057, 4, 0x3056, 4, NONE].as_ptr());
         assert!(!worker.is_null() && !pbuffer.is_null());
+        // Same-thread worker use cannot leave SDL believing its window is
+        // still bound; otherwise a later SDL bind can incorrectly be skipped.
+        assert_eq!(make_current(display, pbuffer, pbuffer, worker), TRUE);
+        assert!(sdl2::sys::SDL_GL_GetCurrentWindow().is_null());
+        assert_eq!(current_surface(DRAW), pbuffer);
+        assert_eq!(current_context(), worker);
+        assert_eq!(make_current(display, surface, surface, ctx), TRUE);
+        assert_eq!(current_surface(DRAW), surface);
+        assert_eq!(sdl2::sys::SDL_GL_GetCurrentWindow() as usize, g.window);
+        assert_eq!(get_error(), SUCCESS);
         let handles = (display as usize, worker as usize, pbuffer as usize);
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();

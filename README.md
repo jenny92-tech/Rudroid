@@ -12,17 +12,21 @@ public corresponding source and the same license for derivatives. See
 
 ## Current status
 
-The five-title baseline passed bounded gameplay, input, process-audio and normal-exit
-checks for Hollow Knight, HSH pixel edition, Terraria, Silksong and Vampire Survivors
-on MiniLoong Pocket One / RK3566 / Mali-G52 / ARM64 Linux / about 4 GiB.
-Silksong's language selection also persists through a normal exit and fresh process.
-The current follow-up kit validates saved process exit on GLES (0.90s) and Vulkan
-(0.89s), fresh save reload, and five native deployment checks; see the exact scope below.
-GLES remains the default. Silksong and Vampire Survivors also passed bounded
-Vulkan paths and backend comparisons. The launcher offers available backends,
-corrects unavailable saved choices before display, and disables unsupported controls.
-See [acceptance and delivery](crates/docs/ACCEPTANCE.md) for exact versions,
-evidence and remaining limits. ARM32, Unity Mono and R36S / 1 GiB are unverified paths.
+Five titles have bounded gameplay, input, audio, save and exit checks on
+MiniLoong / RK3566 / Mali-G52 / about 4 GiB, and TrimUI / Allwinner A523 /
+Mali-G57 / about 1 GiB: Hollow Knight, HSH pixel edition, Terraria, Silksong
+and Vampire Survivors. Silksong's language selection persists across processes.
+
+GLES is the default. MiniLoong also has bounded Silksong and Vampire Survivors
+Vulkan checks. TrimUI's KMSDRM firmware uses GLES: its GPU supports Vulkan,
+but Rudroid's current Vulkan presentation requires Wayland. Unsupported backends
+and controls cannot be selected in the launcher.
+
+The 1 GiB device still shows substantial swapping and loading stalls in Silksong
+and Vampire Survivors. These checks establish short playable paths, not a frame-rate
+improvement or long-term stability claim. See [acceptance](crates/docs/ACCEPTANCE.md)
+for exact kits, firmware and remaining limits. ARM32, Unity Mono and R36S remain
+unverified.
 
 ## Documentation
 

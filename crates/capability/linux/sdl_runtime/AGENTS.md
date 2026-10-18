@@ -19,6 +19,10 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
 - EGL/ANativeWindow and scaled GL share one geometry/context authority. Driver
   tables are pinned, GL strings initialized once, version/capability policies
   immutable. Advertising a version does not create driver support.
+- Primary window binding and presentation go through SDL, including KMSDRM's
+  GBM/DRM page flip; never add a second raw EGL swap. Worker pbuffers use native
+  EGL with SDL thread-local bindings cleared, and failed binds restore the
+  previous owner. Guest surface identity survives SDL native-surface replacement.
 - Shader/texture plans hold bounded context/share-group metadata. Preserve linked
   executables through compile failure/deferred deletion, validate CPU/PBO spans,
   restore guest bindings/errors and call native GL outside state locks. Scaling
