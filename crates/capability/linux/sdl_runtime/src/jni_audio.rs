@@ -1,5 +1,5 @@
 //! INPUT: backend-neutral AudioOutput JNI requests and direct PCM16 buffers
-//! OUTPUT: bounded real SDL playback with one producer and joined device teardown
+//! OUTPUT: bounded SDL playback, zero-accept backpressure and joined device teardown
 //! POS: Linux output plugin; JNI stores integer identities, SDL devices stay on their producer thread
 #![forbid(unsafe_code)]
 use rudroid_common::{
@@ -28,6 +28,7 @@ struct Output {
     weak: usize,
     env: JniEnv,
     observed: bool,
+    reported_backpressure: bool,
 }
 impl Drop for Output {
     fn drop(&mut self) {
@@ -104,6 +105,7 @@ extern "C" fn open(env: JniEnv, _class: JObject, rate: i32, channels: i32, frame
                 weak,
                 env,
                 observed: false,
+                reported_backpressure: false,
             },
         );
     });
@@ -118,7 +120,17 @@ extern "C" fn write(env: JniEnv, object: JObject, buffer: JObject, frames: i32) 
         for (sample,bytes) in output.samples[..count].iter_mut().zip(output.bytes.chunks_exact(2)){*sample=i16::from_le_bytes([bytes[0],bytes[1]]) as f32/32768.0;}
         match output.bridge.wait_for_space(frames as usize,Duration::from_secs(1)) {
             Ok(true)=>{},
-            Ok(false)=>{error(env,"audio device stopped consuming PCM");return -1;},
+            Ok(false)=>{
+                // A low-memory load can deschedule the callback for a second.
+                // Reject this block without destroying the output or growing
+                // its queue; the producer can keep draining native work.
+                output.bridge.stats().dropped_frames.fetch_add(frames as u64,Ordering::Relaxed);
+                if !output.reported_backpressure {
+                    output.reported_backpressure=true;
+                    if let Some(host)=HOST.get(){host.log_line(c"SDL","PCM output backpressure timed out; block rejected, output remains open");}
+                }
+                return 0;
+            },
             Err(e)=>{error(env,&format!("PCM wait failed: {e:?}"));return -1;},
         }
         if let Err(e)=output.bridge.submit(&output.samples[..count]){error(env,&format!("PCM submission failed: {e:?}"));return -1;}

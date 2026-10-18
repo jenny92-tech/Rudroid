@@ -18,10 +18,11 @@ Mali-G57 / about 1 GiB: Hollow Knight, HSH pixel edition, Terraria, Silksong
 and Vampire Survivors. Silksong's language selection persists across processes.
 
 GLES is the default. MiniLoong also has bounded Silksong and Vampire Survivors
-Vulkan checks. TrimUI's KMSDRM firmware uses GLES: its GPU supports Vulkan,
-but Rudroid's current Vulkan presentation requires Wayland. An isolated portable
-Weston/Vulkan surface preflight passes; game integration is still pending. Unsupported backends
-and controls cannot be selected in the launcher.
+Vulkan checks. TrimUI can use an optional private Wayland client bundle and its
+installed PortMaster Weston runtime, keeping the system GPU driver. Silksong's
+same-scene test shows lower CPU use but slightly lower presentation throughput
+and more swapping with Vulkan. Unsupported backends and controls cannot be
+selected in the launcher.
 
 The 1 GiB device still shows substantial swapping and loading stalls in Silksong
 and Vampire Survivors. These checks establish short playable paths, not a frame-rate

@@ -33,6 +33,9 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
   A/B evidence is required before enabling it in a deployment profile.
 - The loader publishes audio policy before producers start. SDL owns the callback
   and bounded SPSC ring; JNI converts PCM and uses callback-period backpressure.
+  A one-second queue timeout rejects a block with zero accepted frames and one
+  diagnostic per output; it retains the device for recovery. Invalid buffers,
+  closed outputs and submission failures remain errors; the queue never grows during a stall.
   Input stays on the SDL creator thread, with calibrated axes, HAT/remaps,
   hotplug release, single touch and Select+Start exit handling.
 - Device identity is a cold opt-in policy. Promote device roots under the owner

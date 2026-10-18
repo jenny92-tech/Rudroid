@@ -6,7 +6,7 @@
 use std::{fs, path::{Path, PathBuf}, process::Command};
 
 /// Fingerprinted with the kit; preparation refuses a different vendor patch.
-pub const WSI_PATCH_SHA256: &str = "10a01403c8f38c8193af29e1151b324ca1d7b7bead6b28709a5dbf2c67e98ea7";
+pub const WSI_PATCH_SHA256: &str = "0fb24696fa4c06c21aaf6d55d960f8fdf044a0a1eeee0895bd4636409d912397";
 
 fn run(command: &mut Command) {
     let status = command.status().unwrap_or_else(|error| panic!("{command:?}: {error}"));

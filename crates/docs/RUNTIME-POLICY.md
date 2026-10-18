@@ -86,6 +86,12 @@ implicit layer，`VK_LAYER_PATH` 指向候选 WSI 目录，
 Wayland surface；GBM 精确布局的 DMA-BUF 由 Vulkan 导入，没有逐帧 CPU 拷贝。
 WSI、Vulkan loader 和可选 SDL 查询函数均固定到进程生命周期。
 
+没有系统 Wayland 时，启动器可复用已安装的 PortMaster Weston，只读挂载到独立
+临时目录；客户端 SDL/Vulkan 库随可选包局部加载，GLIBC 最低 2.29，音频路径保留。
+共享辅助程序拥有子进程、会话锁和挂载；游戏结束后停止合成器、卸载并释放显示租约。
+游戏期阻塞等待子进程退出，不增加诊断轮询或后台采样；不修改系统 ICD、驱动或启动文件。
+缺少依赖或原生预检失败时，菜单禁用 Vulkan。各游戏只调用同一入口，不复制检测流程。
+
 preflight 只证明真实硬件和 surface 可用，报告零游戏帧；只有成功的 guest
 `vkQueuePresentKHR` 才发送呈现回调。Unity 的固定 EGL 导入复用已有 facade，
 没有 GLES session 时明确返回未初始化，不把 Android window token 交给原生 EGL。

@@ -108,3 +108,45 @@ fn subsequent_images_must_keep_the_first_images_stride() {
         wsialloc_delete(owner);
     }
 }
+
+#[test]
+fn missing_render_node_uses_the_existing_primary_card_for_allocation() {
+    let mut attempted = Vec::new();
+    let file = open_drm_with(None, |path| {
+        attempted.push(path.to_owned());
+        if path.ends_with("renderD128") { Err(std::io::ErrorKind::NotFound.into()) }
+        else { File::open("/dev/null") }
+    }).unwrap();
+    assert_eq!(attempted, ["/dev/dri/renderD128", "/dev/dri/card0"]);
+    assert!(file.metadata().is_ok());
+}
+
+#[test]
+fn existing_render_node_and_permission_errors_never_fall_through_to_a_card() {
+    for denied in [false, true] {
+        let mut attempted = Vec::new();
+        let result = open_drm_with(None, |path| {
+            attempted.push(path.to_owned());
+            if denied { Err(std::io::ErrorKind::PermissionDenied.into()) } else { File::open("/dev/null") }
+        });
+        assert_eq!(attempted, ["/dev/dri/renderD128"]);
+        assert_eq!(result.is_err(), denied);
+    }
+}
+
+#[test]
+fn explicit_drm_node_is_respected_and_unrelated_paths_never_open() {
+    for path in ["/dev/dri/card0", "/dev/dri/card15", "/dev/dri/renderD128", "/dev/dri/renderD255"] {
+        let mut attempted = Vec::new();
+        let error = open_drm_with(Some(path), |selected| {
+            attempted.push(selected.to_owned());
+            Err(std::io::ErrorKind::NotFound.into())
+        }).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(attempted, [path]);
+    }
+    for path in ["/tmp/card0", "/dev/dri/card0/../card1", "/dev/dri/card16", "/dev/dri/renderD127", "/dev/dri/renderD256"] {
+        let error = open_drm_with(Some(path), |_| panic!("invalid device must not reach filesystem access")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}

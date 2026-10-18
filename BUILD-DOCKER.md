@@ -17,6 +17,11 @@ bash crates/scripts/docker-rust.sh test --sdl -- -p rudroid-unity-loader
 不接受 `--` 参数。
 
 实验 Vulkan kit 使用 `bash crates/scripts/docker-rust.sh build --release --vulkan`。
+无系统 Wayland 客户端的固件可用 `build --release --portable-wayland`，同一固定环境
+另生成 `target/release/portable-wayland/`：固定 SDL 2.32.6 源码与通用 Vulkan loader。
+不安装系统包或 GPU 驱动；库仅供游戏局部使用，仍需 PortMaster Weston 和实机验收。
+这两项外部依赖单独审计到目标 GLIBC≤2.33 并记录实际最低版本，不放宽核心 kit
+的 GLIBC≤2.28 门禁；不能把该附加包默认发给更旧固件。
 它包含 SDL/Vulkan feature，先完整构建 Rust，再经 native-build 生成独立
 `target/release/vulkan-wsi/`。固定镜像已有 GNU 编译器和 wayland-scanner 即可；
 WSI、Vulkan-Headers、Wayland protocols 与 UAPI 头文件按固定提交/SHA 校验到

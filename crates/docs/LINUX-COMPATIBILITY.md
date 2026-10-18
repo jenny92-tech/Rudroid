@@ -10,15 +10,16 @@ Buildroot 2022.05、GLIBC 2.33 上检查。设备树与真实库优先于 PortMa
 A133plus 名称：SDL 2.32.6 使用 KMSDRM，原生输出 1280×720。
 主窗口须由 SDL 完成交换及 page flip，不能只调用原生 `eglSwapBuffers`。
 系统 SDL 未编译 PulseAudio backend，启动器沿用 ALSA 的 Pulse 插件连接现有声卡服务。
-系统 SDL 不带 Wayland backend，Vulkan loader 也未编译 Wayland surface 入口；
-当前正式入口仍禁止选择 Vulkan，保留 GLES。不能由这两项推导固件不能运行 Wayland。
+系统 SDL 不带 Wayland backend，Vulkan loader 也未编译 Wayland surface 入口。
+可选私有包提供 SDL 2.32.6 和通用 Vulkan loader，复用已安装的 PortMaster Weston
+13.0.90 与 Mali-G57 Vulkan 1.2.225。两客户端的直接 GLIBC 需求为 **2.29**，
+独立审计，不扩大核心 kit 的 GLIBC≤2.28 声明。旧版上游 SDL 强制初始化本固件
+缺少的 Wayland EGL，不能只按 SDL 版本号推定可用；最终以原生探测和游戏验证为准。
 
-后续隔离测试中，PortMaster 自带 Weston 13.0.90 经原生 DRM/Mali-G57 硬件启动。
-局部使用带 Wayland 支持的通用 Vulkan loader 后，实例、Wayland surface 创建成功，
-Mali-G57 Vulkan 1.2.225 图形队列报告可呈现。该 loader 直接要求 GLIBC 2.29，
-仅验证本固件；不能替代核心 kit 的 GLIBC≤2.28 门禁。没有替换系统库或 GPU 驱动。
-尚未接入支持 Wayland 的 SDL，亦未测试交换链、实际提交或游戏性能；服务器/原生
-surface 预检不算游戏验收。具体证据和当前交付边界见[验收](ACCEPTANCE.md)。
+此固件只有 DRM card0，没有 renderD128；WSI 仅在默认 render 节点不存在时用
+card0 分配 GBM 缓冲，不申请 modeset/DRM master。多 VkSurfaceKHR 共用同一原生
+surface 的同步对象，最后 owner 才释放。真实交换链/GPU 回读与丝之歌关卡已验证，
+GLES 仍为默认；实际游戏与性能范围见[验收](ACCEPTANCE.md)。系统库和 GPU 驱动保持原样。
 
 ## 系统要求
 

@@ -6,6 +6,8 @@ set -euo pipefail
 bash scripts/build-kit.sh "$@"
 rudroid_wsi_profile=debug
 rudroid_wsi_cargo_profile=()
+rudroid_wsi_clients=()
+[ "${RUDROID_PORTABLE_WAYLAND:-0}" != 1 ] || rudroid_wsi_clients=(--portable-wayland)
 for rudroid_wsi_arg in "$@"; do
     if [ "$rudroid_wsi_arg" = --release ]; then
         rudroid_wsi_profile=release
@@ -14,4 +16,4 @@ for rudroid_wsi_arg in "$@"; do
 done
 cargo run --locked -p rudroid-native-build --bin rudroid-vulkan-wsi-builder \
     "${rudroid_wsi_cargo_profile[@]+"${rudroid_wsi_cargo_profile[@]}"}" \
-    -- "$CARGO_TARGET_DIR" "$rudroid_wsi_profile"
+    -- "$CARGO_TARGET_DIR" "$rudroid_wsi_profile" "${rudroid_wsi_clients[@]+"${rudroid_wsi_clients[@]}"}"

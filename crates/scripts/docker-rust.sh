@@ -5,7 +5,7 @@
 set -euo pipefail
 
 usage() {
-    echo 'Usage: bash crates/scripts/docker-rust.sh {build|test|check} [--release] [--thin-lto] [--pgo-generate | --pgo-use <profdata>] [--sdl | --vulkan] [-- <cargo args>]' >&2
+    echo 'Usage: bash crates/scripts/docker-rust.sh {build|test|check} [--release] [--thin-lto] [--pgo-generate | --pgo-use <profdata>] [--sdl | --vulkan | --portable-wayland] [-- <cargo args>]' >&2
     exit 2
 }
 [ "$#" -gt 0 ] || usage
@@ -15,6 +15,7 @@ args=(--locked)
 features=''
 sdl=0
 vulkan=0
+portable_wayland=0
 release=0
 thin_lto=0
 pgo_mode=''
@@ -28,11 +29,13 @@ while [ "$#" -gt 0 ]; do
         --pgo-use) [ -z "$pgo_mode" ] && [ "$#" -ge 2 ] || usage; pgo_mode=use; pgo_file="$2"; shift ;;
         --sdl) sdl=1 ;;
         --vulkan) vulkan=1; sdl=1 ;;
+        --portable-wayland) portable_wayland=1; vulkan=1; sdl=1 ;;
         --) shift; extra=("$@"); break ;;
         *) usage ;;
     esac
     shift
 done
+[ "$portable_wayland" = 0 ] || [ "$action" = build ] || usage
 if [ "$sdl" = 1 ]; then features='rudroid-linux-sdl-runtime/sdl'; fi
 if [ "$vulkan" = 1 ]; then features+=',rudroid-linux-sdl-runtime/vulkan'; fi
 # Cargo profile environment reaches nested fixture builds as well. Keep the
@@ -74,6 +77,9 @@ cache="$root/crates/target/docker-linux-arm64"
 mkdir -p "$cache/target" "$cache/cargo"
 if [ "$vulkan" = 1 ]; then
     python3 "$root/crates/scripts/vulkan-input.py" --cache "$cache/target/native-inputs/vulkan-wsi"
+fi
+if [ "$portable_wayland" = 1 ]; then
+    python3 "$root/crates/scripts/wayland-input.py" --cache "$cache/target/native-inputs/portable-wayland"
 fi
 pgo_options=()
 if [ -n "$pgo_mode" ]; then
@@ -130,6 +136,7 @@ while :; do
         -e MESA_SHADER_CACHE_DIR=/work/crates/target/mesa-shader-cache \
         -e MESA_SHADER_CACHE_MAX_SIZE=32M \
         -e "RUDROID_KIT_FEATURES=${features:+--features $features}" \
+        -e "RUDROID_PORTABLE_WAYLAND=$portable_wayland" \
         "${codegen_options[@]+"${codegen_options[@]}"}" \
         "${pgo_options[@]+"${pgo_options[@]}"}" \
         "${game_options[@]+"${game_options[@]}"}" \
@@ -140,6 +147,11 @@ while :; do
     if [ "$status" = 125 ] && running; then continue; fi
     if [ "$status" = 125 ] && [ -n "$(docker ps -aq --filter "name=^${name}\$")" ]; then
         echo "docker-rust.sh: a stopped container named $name blocks the run; inspect it with 'docker ps -a --filter name=$name' and remove it ('docker rm $name') once confirmed stale." >&2
+    fi
+    if [ "$status" = 0 ] && [ "$portable_wayland" = 1 ]; then
+        rudroid_client_profile=debug
+        [ "$release" = 0 ] || rudroid_client_profile=release
+        python3 "$root/crates/scripts/wayland-input.py" --runtime "$cache/target/$rudroid_client_profile/portable-wayland" || status=$?
     fi
     exit "$status"
 done

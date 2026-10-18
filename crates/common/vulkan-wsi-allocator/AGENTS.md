@@ -7,6 +7,9 @@ upstream MIT Wayland WSI layer, never a capability or a
 direct dependency of the loader. Uses the target's existing GBM driver.
 
 ## Design
+- Prefer renderD128; only its absence permits card0 for proprietary Mali
+  firmware. Explicit overrides accept DRM nodes only; never acquire DRM master
+  or change modes. Permission errors do not silently select another device.
 - The allocator owns one GBM device and DRM File. A process-pinned library owns
   every native function pointer. Buffer objects borrow that device synchronously.
 - GBM chooses the exact requested DRM modifier. Read its stride/offset/plane
@@ -35,4 +38,4 @@ direct dependency of the loader. Uses the target's existing GBM driver.
 | Path | Responsibility |
 |------|----------------|
 | `src/lib.rs` | Native wsialloc/GBM ABI, immutable function table and RAII ownership |
-| `tests/unit/lib.rs` | ABI layout, rejected flags/geometry and partial-failure ownership contracts |
+| `tests/unit/lib.rs` | ABI layout, DRM-node selection, rejected flags/geometry and partial-failure ownership contracts |

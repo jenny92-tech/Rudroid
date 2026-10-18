@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub mod vulkan_wsi;
+pub mod portable_wayland;
 
 /// The only target with native boundaries; other targets compile nothing.
 pub const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";

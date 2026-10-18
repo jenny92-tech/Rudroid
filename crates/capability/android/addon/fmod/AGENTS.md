@@ -10,6 +10,9 @@ No SDL code: playback belongs to the Linux backend that implements `org/rudroid/
 - `rudroid_plugin_register_jni` registers the `org/fmod` stubs (guest libraries present or not), then joins the session: `FMOD.checkInit()Z` must answer true.
 - `FMODAudioDevice.start` takes the single mixer lease and spawns `rudroid-fmod-mixer`, looping `fmodProcess` → `AudioOutput.write` on a direct PCM16 buffer, reopening on format change. It consumes the reference clocked/silence/cached-format/diagnostic switches: transient invalid formats reuse only a complete validated cache when opted in; unready mixers output cleared PCM; clocked mode follows one block deadline. The VM zeros only owned PCM storage before synchronous mixing; borrowed buffers are refused.
 - The pre-native Lifecycle hook blocks new starts but keeps existing mixers processing native streaming-release commands. The engine's AudioDevice.stop/close callback synchronously joins its producer before freeing mixer state; a post-native Lifecycle hook provides the final join and partial-init cleanup. It creates no extra worker or frame work.
+- A bounded AudioOutput queue timeout accepts zero frames. The producer continues
+  native mixing so stream releases can drain and playback can recover; backend
+  errors or invalid partial writes still stop it. No extra PCM queue is retained.
 - `rudroid_plugin_init` subscribes to Unity/Fmod/FmodStudio events: Unity checks the guest `.so` files (`StubbedMissingGuest` if both missing); Fmod detours the first resolved `SetOutput` symbol (`Bridged` or `HookFailed`).
 - The `SetOutput` hook tries AUDIOTRACK → NOSOUND → OPENSL → AUTODETECT → requested, falling back to NOSOUND + OK; reentrant calls go straight to the original. The typed `Original` installer owns detour installation and original publication together.
 

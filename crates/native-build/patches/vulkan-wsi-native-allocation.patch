@@ -35,3 +35,140 @@
     sync_fd_fence_sync present_fence;
  };
  
+--- a/wsi/wayland/surface.cpp
++++ b/wsi/wayland/surface.cpp
+@@ -117,6 +117,12 @@
+ 
+    return VK_SUCCESS;
+ }
++
++// Wayland permits one synchronization object per native wl_surface, while
++// Vulkan may keep several VkSurfaceKHR query/recreation handles alive. The
++// intrusive list shares that object without another allocation or frame lock.
++std::mutex surface::sync_mutex;
++surface *surface::sync_surfaces = nullptr;
+ 
+ struct surface::init_parameters
+ {
+@@ -241,15 +247,10 @@
+       return false;
+    }
+ 
+-   auto surface_sync_obj =
+-      zwp_linux_explicit_synchronization_v1_get_synchronization(explicit_sync_interface.get(), wayland_surface);
+-   if (surface_sync_obj == nullptr)
+-   {
+-      WSI_LOG_ERROR("Failed to retrieve surface synchronization interface");
+-      return false;
+-   }
+-
+-   surface_sync_interface.reset(surface_sync_obj);
++   if (!init_surface_sync())
++   {
++      return false;
++   }
+ 
+    VkResult vk_res = get_supported_formats_and_modifiers(wayland_display, surface_queue.get(), dmabuf_interface.get(),
+                                                          supported_formats);
+@@ -275,9 +276,67 @@
+    return nullptr;
+ }
+ 
++bool surface::init_surface_sync()
++{
++   std::lock_guard<std::mutex> lock(sync_mutex);
++   for (surface *item = sync_surfaces; item != nullptr; item = item->sync_next)
++   {
++      if (item->wayland_display == wayland_display && item->wayland_surface == wayland_surface)
++      {
++         shared_surface_sync = item->shared_surface_sync;
++         break;
++      }
++   }
++   if (shared_surface_sync == nullptr)
++   {
++      surface_sync_interface.reset(zwp_linux_explicit_synchronization_v1_get_synchronization(
++         explicit_sync_interface.get(), wayland_surface));
++      shared_surface_sync = surface_sync_interface.get();
++      if (shared_surface_sync == nullptr)
++      {
++         return false;
++      }
++   }
++   sync_next = sync_surfaces;
++   sync_surfaces = this;
++   return true;
++}
++
+ surface::~surface()
+ {
+-}
++   std::lock_guard<std::mutex> lock(sync_mutex);
++   if (shared_surface_sync == nullptr)
++   {
++      return;
++   }
++   surface **link = &sync_surfaces;
++   while (*link != nullptr && *link != this)
++   {
++      link = &(*link)->sync_next;
++   }
++   assert(*link == this);
++   if (*link == this)
++   {
++      *link = sync_next;
++   }
++   if (surface_sync_interface.get() != nullptr)
++   {
++      for (surface *item = sync_surfaces; item != nullptr; item = item->sync_next)
++      {
++         if (item->wayland_display == wayland_display && item->wayland_surface == wayland_surface)
++         {
++            item->surface_sync_interface = std::move(surface_sync_interface);
++            wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(item->surface_sync_interface.get()),
++                               item->surface_queue.get());
++            break;
++         }
++      }
++      // Destroy under the same lock as acquisition, before another handle can
++      // create a replacement object for this connection's native surface.
++      surface_sync_interface.reset();
++   }
++}
++
+ 
+ wsi::surface_properties &surface::get_properties()
+ {
+--- a/wsi/wayland/surface.hpp
++++ b/wsi/wayland/surface.hpp
+@@ -32,6 +32,7 @@
+ #define __STDC_VERSION__ 0
+ #endif
+ #include <wayland-client.h>
++#include <mutex>
+ 
+ #include "wsi/surface.hpp"
+ #include "surface_properties.hpp"
+@@ -108,7 +109,7 @@
+     */
+    zwp_linux_surface_synchronization_v1 *get_surface_sync_interface()
+    {
+-      return surface_sync_interface.get();
++      return shared_surface_sync;
+    }
+ 
+    /**
+@@ -145,6 +146,13 @@
+     * @return true on success, false otherwise.
+     */
+    bool init();
++
++   /** Share explicit synchronization across live handles for one native surface. */
++   bool init_surface_sync();
++   static std::mutex sync_mutex;
++   static surface *sync_surfaces;
++   surface *sync_next{ nullptr };
++   zwp_linux_surface_synchronization_v1 *shared_surface_sync{ nullptr };
+ 
+    friend void surface_registry_handler(void *data, struct wl_registry *wl_registry, uint32_t name,
+                                         const char *interface, uint32_t version) VWL_API_POST;

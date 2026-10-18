@@ -28,6 +28,10 @@
 - SDL 的编译/实际 video/audio driver；Wayland/X11 socket 或 KMSDRM/GBM/DRM master。
 - 匹配目标 ABI 的 SDL/EGL/GLES/libmali 及其 DT_NEEDED；优先系统已有可工作 GPU 栈。
 - 实际窗口/drawable、渲染尺寸、GLES 版本/扩展/纹理格式、输入设备和声音路由。
+- Vulkan 需分开核对 loader 的 Wayland 入口、可用窗口会话、ICD 和实际交换链；
+  实例/surface 查询通过不代表已提交画面。专有 Mali 固件可能只有 card0 和 mali0，
+  没有 renderD128；只复用已有 GBM 分配缓冲，不取得 DRM master 或切换驱动。
+  可选私有 SDL/Vulkan 包有自己的 ARM64/glibc 下限，不能跨 ARM32 或 musl 混用。
 
 文件或 driver 名存在只是线索，必须创建 context、绘制并 present。
 合成器负责的旋转不重复做；物理输出与 guest 渲染尺寸分别记录。

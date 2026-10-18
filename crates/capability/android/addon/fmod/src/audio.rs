@@ -407,7 +407,11 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
             log("engine mixer failed to fill PCM");
             break;
         }
-        if int(env, output, write, &[Arg::object(buffer), Arg::int(frames)]) != frames {
+        let written = int(env, output, write, &[Arg::object(buffer), Arg::int(frames)]);
+        // Zero accepts no PCM after a bounded backpressure timeout. Keep the
+        // native mixer servicing stream releases; the next block can recover.
+        // Backend errors and invalid partial writes still stop this producer.
+        if env.exception_check() || (written != frames && written != 0) {
             break;
         }
         process_count = process_count.saturating_add(1);

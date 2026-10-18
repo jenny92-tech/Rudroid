@@ -7,6 +7,8 @@
 Contains Rudroid's Android, Linux and Unity capabilities and the thin loader.
 Current bounded acceptance covers five MiniLoong and TrimUI/A523 GLES titles
 ([scope and 1 GiB limits](docs/ACCEPTANCE.md));
+TrimUI's optional portable Wayland/Vulkan route covers two bounded title paths,
+with GLES retained as default after a same-scene comparison.
 Host Config TOML stays compatible with existing launchers. The sibling Bogodroid
 C++ tree is a read-only behavioral reference, not a build dependency.
 Terms: [CONTEXT](../CONTEXT.md); comparison rules: [REFERENCE](docs/REFERENCE.md).
@@ -83,6 +85,7 @@ production build. PGO training and fixture-enabled outputs cannot ship.
 | Unity loader | `project/unity_loader/` | `rudroid-unity-loader`: loading, validation, registry, guest bring-up |
 | Docker entry | `scripts/docker-rust.sh` | The only Docker build/check/test entry |
 | Optional Vulkan sources | `scripts/vulkan-input.py` | Pinned, SHA256-verified WSI/headers in the existing target cache; no toolchain installation |
+| Optional Wayland clients | `scripts/wayland-input.py`, `scripts/test_wayland_input.py` | Pinned SDL sources, pinned generic Vulkan loader, archive/cache integrity and separate target ABI manifest |
 | Kit build | `scripts/build-kit.sh`, `scripts/vulkan-kit.sh`, `scripts/cross-build-linux.sh` | Feature-recording build, optional WSI post-build and Linux ARM64 cross build |
 | Deploy | `scripts/deploy-select.py`, `scripts/kit-manifest.py`, `scripts/kit_markers.py` | Copy a kit subset; record/verify kit ids; test-marker table |
 | ABI audit | `scripts/linux_abi.py` | Static ELF glibc-ceiling audit (default 2.28) |

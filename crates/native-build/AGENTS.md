@@ -16,6 +16,9 @@ Package `rudroid-native-build`, a plain library with no descriptor and no depend
   DMA-BUF layouts. No experimental FIFO thread or system installation.
   Artifacts, the root noncommercial LICENSE/NOTICE, dependency notices and
   upstream provenance stay in `vulkan-wsi/`.
+- Optional portable Wayland clients build the pinned SDL source with GNU
+  configure/make and copy a pinned generic Vulkan loader. No system installation;
+  these external libraries have their own target ABI audit and notices.
 
 ## Constraints
 - Never read `CC`/`CFLAGS` or other env overrides: flags are source code and part of the kit fingerprint.
@@ -30,6 +33,7 @@ Package `rudroid-native-build`, a plain library with no descriptor and no depend
 | Manifest | `Cargo.toml` | Plain library with no dependencies |
 | Native contract | `src/lib.rs` | `NativeSources`, `build`, flags, object names, toolchain choice |
 | External WSI dependency | `src/vulkan_wsi.rs`, `src/wsi_main.rs` | Optional fixed GNU ARM64 build after the Rust kit; never linked into a capability |
+| Portable clients | `src/portable_wayland.rs` | Fixed Wayland SDL build and generic Vulkan loader bundle, selected only for an optional private compositor route |
 | WSI ABI gate | `src/vulkan_wsi_abi.c` | Compile-time native wsialloc layout assertions |
-| Vendor patch | `patches/vulkan-wsi-native-allocation.patch` | Reuse the first real GBM allocation during upstream image-layout discovery |
+| Vendor patch | `patches/vulkan-wsi-native-allocation.patch` | Reuse GBM layout allocation; share one native Wayland sync object through the last live surface handle |
 | Unit tests | `tests/unit/lib.rs` | Optimization per profile, C vs assembly args, object names, toolchain |

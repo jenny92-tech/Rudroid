@@ -60,6 +60,8 @@ identity through final cleanup. The default terminal path must drain without an
 injected pause; a separate ordinary pause still stops its producer. Both profile
 spy contracts require nativeDone exactly once and no terminal nativePause. This
 is separate from real-driver/game audio.
+The same fixture checks recovery after zero-accept output stalls and native
+release/owner-stop progress while the output keeps rejecting PCM.
 
 | Name | Path | Responsibility |
 |------|------|----------------|

@@ -98,6 +98,28 @@ fn supported_format(format: Format) -> bool {
         && format.flags & !1 == 0 && format.modifier != 0x00ff_ffff_ffff_ffff
 }
 
+fn valid_drm_path(path: &str) -> bool {
+    path.strip_prefix("/dev/dri/renderD").and_then(|s| s.parse::<u16>().ok())
+        .is_some_and(|n| (128..=255).contains(&n))
+        || path.strip_prefix("/dev/dri/card").and_then(|s| s.parse::<u16>().ok())
+            .is_some_and(|n| n <= 15)
+}
+
+fn open_drm_with(explicit: Option<&str>, mut open: impl FnMut(&str) -> std::io::Result<File>) -> std::io::Result<File> {
+    if let Some(path) = explicit {
+        if !valid_drm_path(path) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "expected a DRM device node"));
+        }
+        return open(path);
+    }
+    match open("/dev/dri/renderD128") {
+        // Proprietary Mali firmware may expose GBM through the primary card
+        // with no render node. Buffer allocation requires no DRM master lease.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => open("/dev/dri/card0"),
+        result => result,
+    }
+}
+
 #[no_mangle]
 pub static wsialloc_symbol_version_3: u32 = 3;
 
@@ -110,9 +132,12 @@ pub unsafe extern "C" fn wsialloc_new(output: *mut *mut Allocator) -> i32 {
     // SAFETY: writable native output under the function contract.
     unsafe { *output = std::ptr::null_mut() };
     let Ok(gbm) = Gbm::load() else { return -3; };
-    let path = std::env::var("RUDROID_VULKAN_GBM_DEVICE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
-    if !path.strip_prefix("/dev/dri/renderD").and_then(|s| s.parse::<u16>().ok()).is_some_and(|n| (128..=255).contains(&n)) { return -1; }
-    let Ok(drm) = OpenOptions::new().read(true).write(true).open(path) else { return -3; };
+    let explicit = std::env::var("RUDROID_VULKAN_GBM_DEVICE").ok();
+    let drm = match open_drm_with(explicit.as_deref(), |path| OpenOptions::new().read(true).write(true).open(path)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return -1,
+        Err(_) => return -3,
+    };
     // SAFETY: open DRM fd stays owned by Allocator; exact native GBM prototype.
     let device = unsafe { (gbm.create_device)(drm.as_raw_fd()) };
     if device.is_null() { return -3; }

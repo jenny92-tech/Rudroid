@@ -15,6 +15,9 @@ static CLOSED: AtomicUsize = AtomicUsize::new(0);
 static FIRST_ERROR: AtomicUsize = AtomicUsize::new(0);
 static PAUSES: AtomicUsize = AtomicUsize::new(0);
 static RELEASE_NEEDS_MIXER: AtomicBool = AtomicBool::new(true);
+static STALLED_WRITES: AtomicUsize = AtomicUsize::new(0);
+static OUTPUT_BLOCKED: AtomicBool = AtomicBool::new(false);
+static ACCEPTED_WRITES: AtomicUsize = AtomicUsize::new(0);
 
 extern "C" fn info(_: JniEnv, _: JObject, index: i32) -> i32 {
     if !ALIVE.load(Ordering::Acquire) { AFTER_FREE.fetch_add(1, Ordering::Relaxed); }
@@ -30,6 +33,11 @@ extern "C" fn open(env: JniEnv, class: JObject, _: i32, _: i32, _: i32) -> JObje
 }
 extern "C" fn write(_: JniEnv, _: JObject, _: JObject, frames: i32) -> i32 {
     std::thread::sleep(Duration::from_millis(1));
+    if OUTPUT_BLOCKED.load(Ordering::Acquire)
+        || STALLED_WRITES.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok() {
+        return 0;
+    }
+    ACCEPTED_WRITES.fetch_add(1, Ordering::Release);
     frames
 }
 extern "C" fn close(_: JniEnv, _: JObject) { CLOSED.fetch_add(1, Ordering::Relaxed); }
@@ -75,6 +83,9 @@ extern "C" fn failure(env: JniEnv, _: JObject) {
 fn run_case(kit: &Path, case: &str) {
     let expects_error = matches!(case, "early-error" | "late-error" | "both-errors");
     let compatible_pause = case == "pause-compatible";
+    let transient_output_stall = case == "output-stall";
+    STALLED_WRITES.store(if transient_output_stall { 5 } else { 0 }, Ordering::Release);
+    OUTPUT_BLOCKED.store(case == "output-blocked", Ordering::Release);
     RELEASE_NEEDS_MIXER.store(!compatible_pause, Ordering::Release);
     host_api::install_config(Some(rudroid_host_config::HostConfig::parse("[paths]\nandroid_files='conf'\n").unwrap())).unwrap();
     let host = host_api::table();
@@ -109,8 +120,13 @@ fn run_case(kit: &Path, case: &str) {
     let start = env.method(class, c"start", c"()V").unwrap();
     env.call_void(device, start, &[]);
     let deadline = Instant::now() + Duration::from_secs(1);
-    while MIXES.load(Ordering::Acquire) < 3 && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(1)); }
-    assert!(MIXES.load(Ordering::Acquire) >= 3, "real producer must start");
+    let required_mixes = if transient_output_stall { 9 } else { 3 };
+    while MIXES.load(Ordering::Acquire) < required_mixes && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(1)); }
+    assert!(MIXES.load(Ordering::Acquire) >= required_mixes, "producer must survive zero-accept writes");
+    if transient_output_stall {
+        assert_eq!(STALLED_WRITES.load(Ordering::Acquire), 0);
+        assert!(ACCEPTED_WRITES.load(Ordering::Acquire) >= 3, "PCM resumes after transient output stalls");
+    }
     if expects_error {
         assert_eq!(rudroid_common::jni_abi::declare_superclass(env, c"rudroid/FailingShutdown", c"java/lang/Runnable"), 0);
         assert_eq!(env.register_class(c"rudroid/FailingShutdown", &[Native::new0(c"run", c"()V", failure)]), 0);
@@ -184,7 +200,7 @@ fn streamed_audio_drains_before_native_owner_release() {
         let source = rudroid_test_support::cargo::ensure_workspace_cdylib(package, stem);
         std::fs::copy(source, kit.join(file)).unwrap();
     }
-    for case in ["normal", "early-error", "late-error", "both-errors", "pause-compatible"] {
+    for case in ["normal", "early-error", "late-error", "both-errors", "pause-compatible", "output-stall", "output-blocked"] {
         let result = std::process::Command::new("timeout").arg("20")
             .arg(std::env::current_exe().unwrap())
             .args(["streamed_audio_drains_before_native_owner_release", "--exact", "--nocapture"])
