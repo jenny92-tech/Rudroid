@@ -9,8 +9,10 @@ The sibling Bogodroid C++ tree is a read-only behavior reference, not a dependen
 Read the [documentation index](docs/README.md), then the relevant module's AGENTS.
 Current acceptance covers five bounded MiniLoong and TrimUI/A523 GLES title paths;
 TrimUI production keeps GLES with 1 GiB memory limits; optional private
-Weston/Vulkan has bounded Silksong and Vampire Survivors checks. Its same-scene
-Silksong comparison shows no frame-rate gain. ARM32 and Mono remain unverified.
+Weston/Vulkan has bounded Silksong and Vampire Survivors checks. One-shot render
+thread placement is limited to measured TrimUI/A523 Silksong topology and helps
+both backends; Vulkan itself has no general frame-rate guarantee. ARM32 and Mono
+remain unverified.
 
 ## Design
 

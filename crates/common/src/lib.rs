@@ -35,6 +35,7 @@ pub mod module;
 pub mod pgo;
 pub mod registry;
 pub mod runtime_policy;
+pub mod thread_placement;
 pub mod scan;
 pub mod symbols;
 

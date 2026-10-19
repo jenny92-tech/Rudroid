@@ -201,6 +201,18 @@ v2 RAM/swap headroom 分开，v1 memsw 是合并额度；PSI 只诊断不设未�
 RSS/PSS/SwapPss/GPU 计账不同，缺 PSS 不伪造，换出不等于释放同量物理内存。
 维护在成功首帧后启用，不能消除初始化峰值或保证超容量游戏可玩。
 
+## 可选渲染线程分配
+
+`gpu.separateRenderThread` 默认 false；启用时还需 `gpu.renderThreadName` 精确匹配
+Linux 的线程名（1..15 个 ASCII 可见字节）。当前启动器只为 TrimUI/A523 的丝之歌
+写入 true 与 `UnityGfxDeviceW`，不新增菜单或联动内存、画质、分辨率、FPS。
+
+SDL 在 guest 缩小亲和性之前保存宿主允许的在线核，要求恰有一个较高容量核和
+两个等容量较低核。首次成功 GLES/Vulkan 呈现后，仅由实际呈现线程执行一次：
+线程名必须匹配、不是进程主线程，且它和主线程仍只允许同一个较高容量核，才将
+自身移到最初已允许的两个其他核。核编号不写死，后续帧不查询状态或扫描线程。
+拓扑、权限、名称或亲和性不符就保留引擎策略；不改频率、在线核、优先级或其他线程。
+
 ## Unity 工作线程配置
 
 已有入口 `[package].mainIntentBundle = { unity = "-job-worker-count 1" }`，保留其他参数。

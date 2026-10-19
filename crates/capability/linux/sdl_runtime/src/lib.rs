@@ -153,6 +153,8 @@ mod jni_audio;
 mod jni_input;
 #[cfg(all(feature="sdl",target_os="linux"))]
 mod input_policy;
+#[cfg(all(feature = "sdl", target_os = "linux"))]
+mod render_thread;
 #[no_mangle]
 pub extern "C" fn rudroid_plugin_register_jni(
     api: Option<&'static rudroid_common::host_api::HostApiV0>,
@@ -170,6 +172,7 @@ pub extern "C" fn rudroid_plugin_register_jni(
         if let Err(error)=gles_policy::configure(api) {eprintln!("[SDL] {error}");return -1;}
         shader_policy::configure(api);
         if let Err(error)=texture_policy::configure(api) {eprintln!("[SDL] {error}");return -1;}
+        render_thread::configure(api);
         if jni_audio::register(api) != 0 {
             return -1;
         }

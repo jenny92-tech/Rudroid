@@ -441,7 +441,10 @@ unsafe extern "system" fn queue_present(queue: vk::Queue, info: *const vk::Prese
     // SAFETY: exact native presentation prototype; no state lock crosses driver calls.
     let result = unsafe { call(queue, info) };
     if matches!(result, vk::Result::SUCCESS | vk::Result::SUBOPTIMAL_KHR) {
-        if g.presents.fetch_add(1, Ordering::Relaxed) == 0 { eprintln!("[VULKAN] first guest frame presented"); }
+        if g.presents.fetch_add(1, Ordering::Relaxed) == 0 {
+            super::render_thread::first_present();
+            eprintln!("[VULKAN] first guest frame presented");
+        }
         if let Some(presented) = g.presented { presented(); }
     }
     result

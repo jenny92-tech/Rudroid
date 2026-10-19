@@ -42,6 +42,11 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
   lock; removal releases keys/axes before retiring inventory and globals.
 - Capture/trace/statistics are opt-in. Ordinary shader/texture evidence is bounded;
   no diagnostic worker or periodic gameplay I/O is added.
+- Explicit render-thread placement captures the initial permitted CPU mask before
+  Unity narrows it, then runs once on the first successful guest present. GLES
+  and Vulkan share the safe common current-thread boundary. It requires the
+  configured worker name, a different process leader, singleton shared affinity
+  and the measured one-fast/two-slow topology; other cases retain engine policy.
 - Optional `vulkan` selects a separate Wayland preflight and typed Android surface
   bridge. GLES remains default. Native WSI/Vulkan/SDL query libraries stay pinned;
   preflight reports zero game frames. Pixel-size queries are resolved optionally,
@@ -96,6 +101,7 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
 | Native texture facade | `src/texture_gl.rs` | Typed uploads, PBO mapping leases, failure/error preservation, parameter mapping and deletion |
 | Invalidation policy | `src/invalidate_policy.rs` | Immutable opt-in safe no-op framebuffer hints, native fallback and bounded call evidence |
 | Audio policy pump | `src/audio.rs` | Policy validation and dummy/file sinks |
+| Render-thread placement | `src/render_thread.rs` | Immutable opt-in policy and one first-present application; no periodic scans or external thread IDs |
 | Audio device | `src/real_audio.rs` | SDL callback device, SPSC ring, stats and spec report |
 | JNI audio | `src/jni_audio.rs` | `AudioOutput` natives and PCM16 → f32 conversion |
 | JNI input | `src/jni_input.rs` | Creator-thread calibrated axes/buttons, hotplug release/inventory/root ownership, mouse modes, exit chord and input script |

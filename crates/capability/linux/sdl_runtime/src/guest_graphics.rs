@@ -1147,6 +1147,7 @@ unsafe extern "C" fn swap(display: Handle, surface: Handle) -> Bool {
     };
     if result == TRUE && surface as usize == g.surface {
         let swaps=g.swaps.fetch_add(1, Ordering::Relaxed)+1;
+        if swaps == 1 { super::render_thread::first_present(); }
         if let (Some(capture),Some((index,pixels)))=(&g.capture,captured){capture.write(&g,&pixels,swaps,index);}
         if let Some(presented) = g.presented {
             presented();

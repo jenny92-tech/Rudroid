@@ -192,7 +192,8 @@ fn unsafe_stays_within_each_crates_budget() {
         // the native image evidence reads use safe, bounded kernel I/O.
         // Two scalar fd boundaries: create/adopt and seal a bounded snapshot.
         // One training-only, pointer-free LLVM profile writer per pinned image.
-        ("common", 216),
+        // Two current-thread-only affinity syscalls over owned native CPU masks.
+        ("common", 218),
         ("common/host-config", 0),
         // GBM/wsialloc native prototypes and synchronous fd/BO ownership transfer.
         ("common/vulkan-wsi-allocator", 21),

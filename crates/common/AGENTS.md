@@ -71,6 +71,7 @@ Package `rudroid-common`, a plain library with no descriptor, never deployed; th
 | Module kinds, registry | `src/module.rs`, `src/registry.rs` | Module kinds and lifecycle events; C-layout registration structs; `HostStr<'a>` for host-lent C strings |
 | Native clock | `src/clock.rs` | Allocation-free OS monotonic nanoseconds shared by JNI frame time and input; no per-library epoch |
 | Runtime policy | `src/runtime_policy.rs` | Memory modes, target FPS, remaining frame time |
+| Thread placement | `src/thread_placement.rs` | Opt-in asymmetric topology plan and current-thread-only affinity; bounded cold snapshots, no TID ledger, hotplug, frequency changes or worker |
 | Deploy scan, exports | `src/scan.rs`, `src/symbols.rs` | Deploy-dir layout and stems; C export names and callback types |
 | Unit tests | `tests/unit/` | One file per module via `#[path]`, plus kit hash and Host API copy tests |
 | Integration tests | `tests/*.rs` | `kit_identity.rs` kit hash over the real workspace; `unsafe_boundaries.rs` JNI/Host API boundary scan and per-crate `unsafe` budget |
