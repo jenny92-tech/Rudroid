@@ -1,0 +1,15 @@
+[package]
+name = "rudroid-unity-gamepatch-terraria"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Terraria Android Activity compatibility surface"
+
+[lib]
+name = "terraria_android"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }

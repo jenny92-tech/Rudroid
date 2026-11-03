@@ -1,0 +1,17 @@
+[package]
+name = "rudroid-linux-log-stderr"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Linux Host stderr log formatting capability"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit: deploy
+# selection and [plugins].enabled match on this stem.
+name = "platform_log_stderr"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }

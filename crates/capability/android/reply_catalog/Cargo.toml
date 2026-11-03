@@ -1,0 +1,21 @@
+[package]
+name = "rudroid-android-reply-catalog"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Reply Catalog encode load and query for fixed JNI replies"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-reply-catalog-format = { path = "format" }
+rudroid-common = { path = "../../../common" }
+
+[build-dependencies]
+rudroid-reply-catalog-format = { path = "format" }
+
+[dev-dependencies]
+libloading = "0.8"

@@ -1,0 +1,16 @@
+[package]
+name = "rudroid-unity-gamepatch-vampire-survivors"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional Vampire Survivors missing debug shader fallback"
+
+[lib]
+name = "vampire_survivors"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+

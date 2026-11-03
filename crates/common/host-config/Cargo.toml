@@ -1,0 +1,11 @@
+[package]
+name = "rudroid-host-config"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Compatible reader for the existing Host Config TOML dialect"
+
+[dependencies]
+rudroid-common = { path = ".." }
+toml = "0.9"

@@ -1,0 +1,5 @@
+# Preserve verbatim license texts and the checksum-pinned upstream patch.
+/LICENSE -text -whitespace
+/THIRD-PARTY-NOTICES -text -whitespace
+/crates/LICENSE.md -text -whitespace
+/crates/native-build/patches/*.patch -text -whitespace

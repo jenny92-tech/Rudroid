@@ -1,0 +1,33 @@
+AUTHORS — Rudroid
+
+Maintainer and first-party implementation
+----------------------------------------
+jenny92-tech <jennyliu90223@gmail.com>
+  https://github.com/jenny92-tech/Rudroid
+  Rust implementation, compatibility/runtime integration, native glue,
+  title adaptations, resource tools and handheld validation.
+
+Acknowledgements — reference framework
+--------------------------------------
+binarycounter and the Bogodroid contributors.
+  C++ framework used as a behavioral reference and predecessor:
+  https://github.com/binarycounter/Bogodroid
+
+JohnnyOnFlame <https://github.com/JohnnyonFlame>
+  Author of gmloader-net, a predecessor of the Bogodroid framework.
+
+ChristopherHX <https://github.com/ChristopherHX>
+  Author of libjnivm (MIT), the C++ reference JNI implementation.
+  Rudroid's Rust JNI runtime is in crates/capability/android/jni_vm.
+
+Third-party material
+--------------------
+The Android Open Source Project provides the BSD-2-Clause ARM64 jump-buffer
+assembly and the Apache-2.0 JNI test fixture header. Their notices are retained.
+Rust dependencies and optional native components keep their individual licenses;
+see the root NOTICE, THIRD-PARTY-NOTICES and the optional vulkan-wsi/ bundle.
+There are no libjnivm or tomlplusplus submodules in Rudroid.
+
+First-party work uses the root noncommercial source-sharing LICENSE.
+This list acknowledges references without claiming their authors wrote Rudroid's
+Rust implementation. Earlier GPL copies retain their existing permissions.

@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-android-bionic"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description = "Explicit ARM64 Bionic heap and stdio ABI bridge to shared host services"
+
+[lib]
+name = "android_bionic"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+libc = "0.2"
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

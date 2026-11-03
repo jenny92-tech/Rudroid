@@ -1,0 +1,15 @@
+[package]
+name = "rudroid-android-addon-levelplay"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional LevelPlay advertising bridge with explicit offline initialization failure"
+
+[lib]
+name = "sdk_levelplay"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }

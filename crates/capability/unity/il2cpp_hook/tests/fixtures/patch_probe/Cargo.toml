@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-il2cpp-patch-probe"
+version = "0.0.0"
+edition = "2021"
+license-file = "../../../../../../../LICENSE"
+publish = false
+description = "il2cpp_hook CLI test fixture (ticket 50): runtime-kind capability whose init reads the legacy [[il2cpp_patch]] table through Host API v0 getters and logs every observation"
+
+# Own workspace root: the fixture must not be part of the shipped kit.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+name = "il2cpp_probe"
+
+[dependencies]
+rudroid-common = { path = "../../../../../../common" }

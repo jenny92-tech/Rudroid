@@ -1,0 +1,57 @@
+Required Notice: Copyright 2026 jenny92-tech and the Rudroid contributors.
+Required Notice: Rudroid (https://github.com/jenny92-tech/Rudroid)
+
+Thanks to binarycounter and the Bogodroid contributors for laying the foundation
+for Rudroid.
+Upstream project: https://github.com/binarycounter/Bogodroid
+
+Rudroid 自有代码的授权条件：
+- 禁止商业用途，包括收费产品、收费服务和企业业务用途。
+- 发布修改版或二进制时，公开该版本完整、可修改和可构建的对应源码。
+- 对外提供网络功能时，公开实际运行版本的对应源码。
+- 衍生修改沿用同一许可及限制，并保留署名和版权声明。
+- 不对未分发、未向第三方提供网络功能的私人本地修改要求公开。
+
+LICENSE 是这些条件的英文许可正文，适用于本项目自有的实现、测试、原生桥接
+和工具。这属于非商业源码可用授权，不是 OSI 定义下的标准开源许可。
+第三方组件按各自原协议授权，不被本项目的非商业条款重新授权。
+
+License identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
+Status: custom noncommercial source-available license; not OSI-approved.
+
+First-party implementation and provenance
+
+The maintainer confirms that Rudroid was written as a new Rust implementation,
+with Bogodroid's C++ tree used as a behavioral reference. It is not linked into
+or distributed as Rudroid's runtime. The workspace was initially developed in
+that local tree and moved here on 2026-10-09; the directory history alone does
+not determine the copyright ownership of an independent implementation.
+
+The maintainer-owned GLES sharp shader and offline resource tools were developed
+in that local tree before reuse here. The shader's C++ history identifies
+jenny92-tech as its author. Compatibility names, ABI constants and format rules
+remain references, not assertions that Rudroid owns an upstream implementation.
+This notice does not claim rights over Bogodroid's C++ code or other contributors'
+work, or grant permission to relicense such material.
+
+Third-party exceptions
+
+- crates/capability/android/bionic/src/jump.S adapts AOSP's ARM64 setjmp code.
+  Its original BSD-2-Clause notice is retained in the file and reproduced in
+  THIRD-PARTY-NOTICES for binary distribution.
+- crates/capability/android/jni_vm/tests/fixtures/jni.h is an AOSP test header,
+  copied via Bogodroid/libjnivm/include/jni.h. Its Apache-2.0 notice is retained;
+  provenance is documented beside it in JNI-ORIGIN.md.
+- THIRD-PARTY-NOTICES records exact locked Rust dependency versions, registry
+  checksums and original license texts. Include it with binaries.
+- Optional WSI, Vulkan-Headers and Wayland protocol sources carry their own
+  licenses and source receipt in vulkan-wsi/. The linked first-party Rust
+  allocator uses Rudroid's root LICENSE; upstream components keep their terms.
+- Host libraries, games/assets and companion launchers have separate licenses.
+
+Earlier versions
+
+Commit 244b364746e86b519c5f3225797dbe9c848091d4 was published with GPL notices
+for the first-party runtime and tools. This prospective license change does not
+revoke GPL permissions already granted for those earlier copies. Third-party
+copyrights and licenses are preserved; this is not a GPL-plus-noncommercial grant.

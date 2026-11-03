@@ -1,0 +1,15 @@
+# Build outputs, caches and private game inputs
+**/target/
+/dist/
+/gamefiles/
+/build/
+/output/
+# Local tickets, conversations and development experiments
+/.scratch/
+__pycache__/
+.venv-unity/
+*.pyc
+.DS_Store
+.vscode/
+.claude/
+*.apk

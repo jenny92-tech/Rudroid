@@ -1,0 +1,13 @@
+[package]
+name = "rudroid-android-addon-after-unity-module"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Shared post-Unity guest library mapping chain for single-library Android Addons (plain library, no descriptor)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }

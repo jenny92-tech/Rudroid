@@ -1,0 +1,18 @@
+[package]
+name = "rudroid-android-native-events"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional NDK fd event loop and explicit unavailable-sensor boundary"
+
+[lib]
+name = "android_native_events"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+libc = "0.2"
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

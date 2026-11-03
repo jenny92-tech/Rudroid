@@ -1,0 +1,19 @@
+# Terraria Android ARM64 / Unity 2021.3.56f2.
+# Use deploy-select.py --from-profile crates/deploy/terraria.txt --include-loader
+# after a full production build. Pair with configs/terraria.toml; the external
+# files child directory preserves the game's existing conf/Players and Worlds.
+# This is a selected kit inventory, not full gameplay/audio acceptance.
+platform_log_stderr
+android_base
+android_jni_vm
+reply_catalog
+android_elf_load
+android_bionic
+android_native_events
+android_media_fallback
+android_zlib
+android_assets
+platform_sdl_runtime
+unity_2021_3
+sdk_fmod
+terraria_android

@@ -1,0 +1,72 @@
+# Silksong Title Deploy Selection profile (ticket 33).
+#
+# One capability id per line; `#` starts a comment. Ids match the C++ plugin
+# ids and equal the deployed file names (see crates/docs/MIGRATION-MAP.md; the
+# reply_catalog artifact is resolved via the explicit deploy-select alias).
+# Use with:
+#
+#   bash crates/scripts/docker-rust.sh build --release --sdl
+#   python3 crates/scripts/deploy-select.py \
+#       --build crates/target/docker-linux-arm64/target/release \
+#       --dest /tmp/kit-silksong --from-profile crates/deploy/silksong.txt \
+#       --include-loader
+#   python3 crates/scripts/kit-manifest.py scan \
+#       --build /tmp/kit-silksong --output /tmp/silksong-kit.json
+# Then copy that complete selected kit and manifest to the ARM64 device;
+# run its loader --check there (the guest binary does not run on macOS).
+#
+# Redeploying over an existing dir removes this script's stale managed
+# members and never touches user data (ticket 58 semantics).
+# The device Host Config is used AS-IS (schema compatibility is a hard rule;
+# the TOML gains no new required keys). The profile decides what gets copied;
+# without a [plugins] allowlist the loader loads everything it finds.
+
+# Host log sink (stderr).
+platform_log_stderr
+
+# Guest Android base surface (JNI stubs, hooks) + catalog resolver host.
+android_base
+android_jni_vm
+
+# Catalog provider (kind=runtime, ticket 45): registers the fixed-reply
+# provider every RegisterJni phase resolves through. Without it android_base
+# misses getStreamVolume and fails the phase (ticket 76 red chain A).
+reply_catalog
+
+# Guest ELF mapping (libmain/libil2cpp bring-up).
+android_elf_load
+
+# Native Android imports used by the actual ARM64 guest libraries.
+android_bionic
+android_native_events
+android_media_fallback
+android_zlib
+android_assets
+
+# Extracted Android asset-pack overlay used by the device package.
+platform_android_asset_packs
+
+# Unity 6 engine profile — the Silksong reference path.
+unity_6
+
+# Config-driven IL2CPP hook mechanism.
+il2cpp_patch
+
+# Host SDL window/audio backend (Linux device build: --features sdl).
+platform_sdl_runtime
+
+# Android Addons the Silksong reference package loads.
+sdk_fmod
+sdk_unity_burst
+sdk_unity_helpers
+
+# Title gamepatch (package-gated to com.game.silksong).
+silksong_unity6
+
+# Deliberately NOT deployed for Silksong:
+# - sdk_google_gms / sdk_google_play_core: no Play services dependency in the
+#   handheld port package.
+# - sdk_xlua: no xlua scripting surface in the Silksong package.
+# - platform_thread_trace: diagnostic tracing is outside this runtime profile.
+# The former silksong_viewport role is included in silksong_unity6; do not
+# retain the C++ plugin allowlist when switching an existing deployment.

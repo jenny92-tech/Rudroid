@@ -1,0 +1,21 @@
+[package]
+name = "rudroid-unity-gamepatch-hollow-knight"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Hollow Knight viewport Title gamepatch"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "hollow_knight_viewport"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+rudroid-host-config = { path = "../../../../common/host-config" }
+libc = "0.2"
+
+[dev-dependencies]
+rudroid-test-support = { path = "../../../../test-support" }

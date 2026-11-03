@@ -1,0 +1,10 @@
+[package]
+name = "rudroid-reply-catalog-format"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Reply Catalog blob codec and pure query model (dependency-free, build-script safe, no plugin exports)"
+
+[lib]
+path = "src/lib.rs"
