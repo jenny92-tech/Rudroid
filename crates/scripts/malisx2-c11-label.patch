@@ -1,0 +1,10 @@
+--- a/src/vk/mali_shader.c
++++ b/src/vk/mali_shader.c
+@@ -1425,5 +1425,5 @@
+       }
+    }
+-found:
+-
++found: ;
++
+    nir_builder b = nir_builder_at(nir_before_instr(&atest->instr));

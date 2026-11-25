@@ -1,56 +1,25 @@
 //! INPUT: shared JNI/Host API and safe Android service facades
 //! OUTPUT: android_base registration, runtime hooks and JNI framework behavior
 //! POS: keeps platform-facing Android mock business logic outside native pointer boundaries
-//! rudroid-android-framework: registers the guest `java.*` / `android.*`
-//! surface (ticket 14), the Android runtime hooks (ticket 16) and — since
-//! ticket 52 — joins the shared JNI session during the register-JNI phase.
-//!
-//! Rust counterpart of the read-only `android_base` plugin role. The surface
-//! registry binds explicit fixed replies for a documented minimal class set;
-//! anything unbound resolves through the injected catalog fallback
-//! (`CatalogFallback`), and a miss stays visible via the resolver's
-//! `STUB-MISS` callback. The fallback is a seam installed by the runtime
-//! wiring — typically the `android_jni_vm` resolver over the dynamically
-//! loaded `reply_catalog` C API (cross-library registration, ticket 45);
-//! this capability never statically links other capabilities (ticket 43).
-//! The class set grows iteratively toward full Parity with `javastubs/`.
-//!
-//! Ticket 52 session join: `rudroid_plugin_register_jni` resolves the
-//! registry's shared `JavaVM*`, walks GetEnv → FindClass → GetStaticMethodID
-//! → CallStaticIntMethodA on the guest-visible JNI tables and holds a
-//! global class reference as this library's session anchor — the same
-//! session and reference semantics the guest sees. Without a session the
-//! join degrades to a logged skip; a broken session fails the phase.
-//!
-//! Ticket 16: `AndroidHooks { flush_preferences, signal_vsync }` mirrors the
-//! C++ `RudroidAndroidHooks` (android_base registers `flush_preferences` from
-//! `jnivm::android::content::SharedPreferences::flush_all` and
-//! `signal_vsync` from `Choreographer::signalAllVSync`); here the hooks are
-//! registry slots the Unity loop wiring (ticket 31+) can invoke.
-//!
-//! Ticket 77: this library now performs the reference registration itself —
-//! `rudroid_plugin_register_jni` registers both hooks through the existing
-//! `register_android_hooks` C ABI (android_base.cpp registers them inside
-//! its register-JNI phase too), so the production kit satisfies the
-//! profile-prepare gate ("flush_preferences and signal_vsync must be
-//! registered") with NO fixture member in the deploy dir. `flush_preferences`
-//! persists dirty shared preference stores at the reference flush point; `signal_vsync` bumps an atomic frame
-//! counter without logging each frame by default (`unity.log_vsync_frames`
-//! enables diagnostics). The `render_sleep_us` render-loop pacing stays in
-//! the profile capabilities — no Host API surface exists for a
-//! cross-capability wake handoff, so this remains the counter half.
+//! Registers Android framework methods in the shared JNI session and supplies
+//! the preference flush and vsync callbacks used by the Unity player.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, OnceLock};
+
 mod choreographer;
 mod collections;
 mod input;
+mod intent_extras;
+mod intent_filter;
+mod jni_helpers;
 mod java;
 mod keycodes;
 mod lifecycle;
+mod listener_interfaces;
 mod preferences;
 mod services;
+mod application;
 mod statfs;
 mod threads;
 mod trust_store;
@@ -132,7 +101,7 @@ fn register_android_runtime_hooks(api: &rudroid_common::host_api::HostApiV0) {
     api.log_line(c"android_base", message);
 }
 
-use rudroid_reply_catalog_format::ReplyValue;
+
 
 rudroid_common::declare_descriptor!("android_base", rudroid_common::Kind::AndroidBase);
 
@@ -232,181 +201,6 @@ fn join_shared_session(api: &rudroid_common::host_api::HostApiV0) -> c_int {
 #[cfg(test)]
 #[path = "../tests/unit/lib_jni_fake.rs"]
 mod jni_fake;
-
-/// Unbound-call fallback: given `(class, method, sig)`, answer the configured
-/// fixed reply or `None` for a miss. Installed across the dynamic boundary by
-/// the runtime wiring (ticket 45); tests inject catalog-backed closures.
-pub type CatalogFallback = Box<dyn Fn(&str, &str, &str) -> Option<ReplyValue> + Send + Sync>;
-
-/// A method bound to a fixed reply (registered surface) — takes precedence
-/// over the catalog.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BoundMethod {
-    pub method: &'static str,
-    pub sig: &'static str,
-    pub reply: ReplyValue,
-}
-
-/// One registered guest class.
-#[derive(Debug, Clone, Default)]
-pub struct ClassSurface {
-    pub name: &'static str,
-    pub methods: Vec<BoundMethod>,
-}
-
-/// Outcome of a surface call.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Outcome {
-    /// Served by an explicitly bound method.
-    Bound(ReplyValue),
-    /// Served by the injected catalog fallback.
-    Catalog(ReplyValue),
-    /// No binding and no fallback hit — caller default applies.
-    Miss,
-}
-
-impl Outcome {
-    pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            Outcome::Bound(ReplyValue::Bool(b)) | Outcome::Catalog(ReplyValue::Bool(b)) => Some(*b),
-            _ => None,
-        }
-    }
-}
-
-/// The registered guest framework surface.
-pub struct Framework {
-    fallback: Option<CatalogFallback>,
-    classes: Vec<ClassSurface>,
-}
-
-impl Default for Framework {
-    fn default() -> Self {
-        Framework::new()
-    }
-}
-
-impl Framework {
-    /// Framework without a catalog fallback: unbound calls miss until the
-    /// runtime wiring installs one.
-    pub fn new() -> Framework {
-        Framework {
-            fallback: None,
-            classes: Vec::new(),
-        }
-    }
-
-    /// Framework over a caller-built catalog fallback.
-    pub fn with_fallback(fallback: CatalogFallback) -> Framework {
-        Framework {
-            fallback: Some(fallback),
-            classes: Vec::new(),
-        }
-    }
-
-    /// Install or replace the catalog fallback.
-    pub fn set_fallback(&mut self, fallback: CatalogFallback) {
-        self.fallback = Some(fallback);
-    }
-
-    pub fn fallback(&self) -> Option<&CatalogFallback> {
-        self.fallback.as_ref()
-    }
-
-    /// Register a class surface. Re-registering the same name replaces it
-    /// (registration order is not load order — the surface is a set).
-    pub fn register_class(&mut self, surface: ClassSurface) {
-        if let Some(slot) = self.classes.iter_mut().find(|c| c.name == surface.name) {
-            *slot = surface;
-        } else {
-            self.classes.push(surface);
-        }
-    }
-
-    pub fn classes(&self) -> &[ClassSurface] {
-        &self.classes
-    }
-
-    /// Resolve a method call: bound method first, then the injected catalog
-    /// fallback, then miss.
-    pub fn call(&self, class: &str, method: &str, sig: &str) -> Outcome {
-        if let Some(surface) = self.classes.iter().find(|c| c.name == class) {
-            if let Some(bound) = surface
-                .methods
-                .iter()
-                .find(|m| m.method == method && m.sig == sig)
-            {
-                return Outcome::Bound(bound.reply.clone());
-            }
-        }
-        match self.fallback.as_ref().and_then(|f| f(class, method, sig)) {
-            Some(reply) => Outcome::Catalog(reply),
-            None => Outcome::Miss,
-        }
-    }
-}
-
-/// Android runtime hooks (ticket 16), analogous to the C++ `RudroidAndroidHooks`.
-/// `None` slots mean the corresponding surface is not wired in this build —
-/// callers treat invoking them as a programming error and log instead.
-#[derive(Default)]
-pub struct AndroidHooks {
-    /// `SharedPreferences::flush_all` analogue.
-    pub flush_preferences: Option<Box<dyn Fn() + Send + Sync>>,
-    /// `Choreographer::signalAllVSync` analogue.
-    pub signal_vsync: Option<Box<dyn Fn() + Send + Sync>>,
-}
-
-impl AndroidHooks {
-    /// The documented initial registration from the android_base role: both
-    /// hooks wired with process-local no-op-ready implementations. Tests
-    /// install counting closures instead.
-    pub fn register(
-        &mut self,
-        flush_preferences: Box<dyn Fn() + Send + Sync>,
-        signal_vsync: Box<dyn Fn() + Send + Sync>,
-    ) {
-        self.flush_preferences = Some(flush_preferences);
-        self.signal_vsync = Some(signal_vsync);
-    }
-
-    pub fn flush_preferences(&self) {
-        if let Some(hook) = &self.flush_preferences {
-            hook();
-        }
-    }
-
-    pub fn signal_vsync(&self) {
-        if let Some(hook) = &self.signal_vsync {
-            hook();
-        }
-    }
-}
-
-/// The minimal documented class set this ticket registers (names track the
-/// javastubs the C++ android_base registers; only AudioManager/
-/// AudioDeviceInfo carry bound methods because their fixed replies now live
-/// in the catalog — see ticket 15).
-pub fn minimal_class_set() -> Vec<ClassSurface> {
-    vec![
-        ClassSurface {
-            name: "android/media/AudioManager",
-            methods: vec![],
-        },
-        ClassSurface {
-            name: "android/media/AudioDeviceInfo",
-            methods: vec![],
-        },
-        ClassSurface {
-            name: "android/view/Choreographer",
-            methods: vec![],
-        },
-        ClassSurface {
-            name: "android/content/SharedPreferences",
-            methods: vec![],
-        },
-    ]
-}
 
 #[cfg(test)]
 #[path = "../tests/unit/lib.rs"]

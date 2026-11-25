@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# INPUT:  ntpath, dataclasses, pathlib and external audio references
+# INPUT:  dataclasses, pathlib, shared resource names and external audio references
 # OUTPUT:  AudioRef, validate_ref()
 # POS:    校验 AudioClip 外部资源范围与音频头以发现打包错配
 # SPDX-License-Identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
 # Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
 """Internal external-audio range/header checks; called by resource preparation."""
 
-import ntpath
 from dataclasses import dataclass
 from pathlib import Path
+
+from .resource_refs import resource_basename
 
 
 DEFAULT_AUDIO_HEADERS = {
@@ -28,16 +29,13 @@ class AudioRef:
 
 
 def _source_path(resource_dir, source):
-    name = ntpath.basename(source)
-    if name in ("", ".", ".."):
-        raise ValueError(f"invalid resource basename: {source!r}")
-    return Path(resource_dir) / name
+    return Path(resource_dir) / resource_basename(source)
 
 
 def validate_ref(resource_dir, ref, headers=DEFAULT_AUDIO_HEADERS):
     problems = []
     source = ref.source or ""
-    if not source or source.startswith("archive:"):
+    if not source:
         return problems
 
     path = _source_path(resource_dir, source)

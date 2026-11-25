@@ -1,6 +1,7 @@
 # Rudroid 适配与开发规范
 
-实现位于本仓库 `crates/`。相邻 Bogodroid C++ 仓库是只读行为参考。
+实现位于本仓库 `crates/`。Bogodroid 已转为[知识库](https://github.com/jenny92-tech/Bogodroid)，
+历史 C++ 行为从其 Git 记录查阅，不要求相邻 C++ 源码树存在。
 当前支持与交付查[验收](crates/docs/ACCEPTANCE.md)，统一入口查[文档索引](docs/README.md)。
 
 ## 开始工作
@@ -10,13 +11,16 @@
 | 修改源码 | [根 AGENTS](AGENTS.md) → [workspace AGENTS](crates/AGENTS.md) → 对应 crate 的 AGENTS |
 | 新掌机/新游戏 | [移植指南](crates/docs/HANDHELD-PORTING-WORKFLOW.md)，先盘点已有能力，再检查真实设备、包与依赖 |
 | 构建/回归/交付 | [BUILD-DOCKER](BUILD-DOCKER.md)，唯一现行命令及生产部署流程 |
+| 脚本 / 调试 / 离线工具 | [TOOLING](docs/TOOLING.md) 登记表；先复用再扩展，禁止平行发明；过时即删 |
 | JNI/Host API/IL2CPP/unsafe | [common](crates/common/AGENTS.md)、相关 ABI fixture 与调用方 |
-| 生命周期/卸载 | [loader](crates/project/unity_loader/AGENTS.md)、[player_lifecycle](crates/capability/unity/player_lifecycle/AGENTS.md) 与资源 owner |
+| 生命周期/卸载 | [host-core](crates/host/AGENTS.md)、薄 CLI [loader](crates/project/unity_loader/AGENTS.md)、[player_lifecycle](crates/capability/unity/player_lifecycle/AGENTS.md) 与资源 owner |
+| 新 EngineProfile / 非 Unity 引擎 | [ENGINE-PROFILE-CONTRACT](crates/docs/ENGINE-PROFILE-CONTRACT.md)、零 Unity 例 [native_activity](crates/capability/engine/native_activity/AGENTS.md) |
 | 策略与性能 | [运行策略](crates/docs/RUNTIME-POLICY.md)、[性能决策](crates/docs/PERFORMANCE-AUDIT.md) |
 
 在已有授权内自行检查、备份、修改、编译、测试、读取日志，再修首个失败点。
 先复用已验证的平台记录、配置和 capability，只补具体缺口；不能把指南的调查范围
-当作 ARM32/Mono 等后端已经实现。不要让用户手动执行可自行取得的技术操作。
+当作 ARM32、直接 APK Mono 或其他未验收引擎已经实现（有界 ARM64 Mono 见
+[UNITY-MONO](crates/docs/UNITY-MONO.md)）。不要让用户手动执行可自行取得的技术操作。
 
 ## 模块与策略归属
 
@@ -24,17 +28,19 @@
 |---|---|
 | 通用 ELF/Bionic/JNI、句柄、文件与资源所有权 | 现有 android/linux 服务及 common；不识别游戏名、私有类型或 Unity 偏移 |
 | Unity 生命周期与版本 ABI | player_lifecycle 共用流程，profile 的 Spec/原生门控表达版本差异 |
-| 显示/音频/输入后端 | loader 的 host_platform 只负责启动选择，native 资源归实际适配器；音频/输入通过共享 VM 的 AudioOutput/InputSource 交互 |
-| FMOD/Burst/helpers 等库级兼容 | 对应 Android addon，共用加载与服务，不复制进 loader 或各游戏 |
+| 显示/音频/输入后端 | host-core 的 host_platform 只负责启动选择，native 资源归实际适配器；音频/输入通过共享 VM 的 AudioOutput/InputSource 交互 |
+| FMOD/Burst/helpers 等库级兼容 | 对应 Android addon，共用加载与服务，不复制进 host-core/CLI 或各游戏 |
 | 单游戏托管类型、HUD、资源或 native 补丁 | `unity/gamepatch/<title>`，package、版本/完整签名门控及显式配置 |
 | 设备与标题的性能取舍 | 部署配置和有设备/固件/build/资源版本的实测记录，不隐式成为通用默认 |
 
 当前实际宿主实现为 SDL；可替换边界不意味着其他后端已经存在。
 只在启动期选择适配器，不为抽象增加逐帧动态派发、扫描或后台线程。
 
-loader 保持薄入口。能力不直接链接其他 capability；共享代码放无 descriptor 的普通库。
-每个 cdylib 都有自己的 common static，跨插件权威状态必须放 loader/共享 VM 服务。
-每个运行子集恰好一个 android_base 和一个 Unity profile；Host API 扩展遵守尾部追加与版本规则。
+`rudroid-host-core` 拥有发现/Host API/guest/EngineProfile 编排；`unity_loader` 保持薄 CLI。
+能力不直接链接其他 capability；共享代码放无 descriptor 的普通库。
+每个 cdylib 都有自己的 common static，跨插件权威状态必须放 host/共享 VM 服务。
+每个运行子集恰好一个 android_base 和一个 EngineProfile（验收标题为 Unity profile）；
+Host API 扩展遵守尾部追加与版本规则（当前 v7）。
 原生 C/汇编只经 native-build 构建；新模块沿用显式文件布局，不新建 `mod.rs` 或 `build-*` 目录。
 历史 Cargo/Docker/plugin/ABI 名称不能只改某一端，见[能力与产物](crates/docs/MIGRATION-MAP.md)。
 
@@ -75,7 +81,7 @@ GC-handle ABI 只用精确证据；HUD 的受限缺 getter 回退不能扩大旧
 - 追踪先验证实际入口，按字段精确检查 overrun、commit overrun、dropped events，缺失也拒绝。
   不用 substring 匹配零值；关闭 setup 追踪、限制 buffer/时长，API/CPU 追踪与帧窗口分开。
 - 缺环境明确失败或带原因 ignored，不提前 return 伪装成功；嵌套/子进程/定向复测不重复计数。
-  `--check` 会 dlopen 并执行构造函数，只检查可信 kit；`RUDROID_SKIP_GUEST` 在窗口前返回。
+  `--check` 会 dlopen 并执行构造函数，只检查可信 kit 的 descriptor/拓扑（只要提供了 Host Config——启动器位置参数或 `--config`——另查通用 render/memory；不跑引擎 `validate_config`/JNI/guest）；`RUDROID_SKIP_GUEST` 在窗口前返回。
 - 纯文档修改只检查链接、锚点与格式，不启动游戏、部署或重新编译。
 
 ## 已知适配陷阱

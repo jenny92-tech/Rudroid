@@ -1,3 +1,6 @@
+//! INPUT: maintained built-in catalog definitions
+//! OUTPUT: typed fixed JNI response records
+//! POS: reference entries for the catalog builder
 //! In-repo Reply Catalog source table.
 //!
 //! Entries are declared here as Rust `const` data and compiled into the same

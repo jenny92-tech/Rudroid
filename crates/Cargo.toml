@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "common",
+    "host",
     "test-support",
     "native-build",
     "common/host-config",
@@ -27,8 +28,12 @@ members = [
     "capability/linux/sdl_runtime",
     "capability/linux/log_stderr",
     "capability/linux/android_asset_packs",
+    "capability/engine/native_activity",
     "capability/unity/player_lifecycle",
+    "capability/unity/common",
+    "capability/unity/mono",
     "capability/unity/profile_2021_3",
+    "capability/unity/profile_2022_3",
     "capability/unity/profile_6",
     "capability/unity/il2cpp_hook",
     "capability/unity/memory_policy",
@@ -36,6 +41,7 @@ members = [
     "capability/unity/gamepatch/hollow_knight",
     "capability/unity/gamepatch/terraria",
     "capability/unity/gamepatch/vampire_survivors",
+    "capability/unity/gamepatch/soul_knight",
     "project/unity_loader",
 ]
 

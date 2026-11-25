@@ -448,6 +448,9 @@ fn resolve_symbol(
              offset, not an address; TLS binding is not supported (ticket 86)"
         ));
     }
+    if st_shndx >= 0xff00 || info.is_some_and(|value| value & 0xf == 10) {
+        return Err(format!("reserved section or indirect function for symbol `{name}`"));
+    }
     if st_shndx != 0 {
         // Defined inside this module (reference `so_relocate_rel`).
         return Ok(base.wrapping_add(st_value as usize));

@@ -29,6 +29,8 @@ mod stdio;
 #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
 mod sync;
 #[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
+mod sync_observation;
+#[cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]
 mod threads;
 
 rudroid_common::declare_descriptor!(
@@ -76,6 +78,13 @@ pub unsafe extern "C" fn rudroid_bionic_symbol(
             let log = (registry::LOGGING.lookup)(symbol);
             if log != 0 { return log; }
         }
+        // Legacy Unity imports name libstdc++.so, but the ABI is Bionic's
+        // C++ runtime. Never accept the same names through libc or bare dlsym.
+        if !library.is_null() && CStr::from_ptr(library) == c"libstdc++.so" {
+            return if CStr::from_ptr(version) == registry::LIBSTDCXX_VERSION {
+                (registry::LIBSTDCXX.lookup)(symbol)
+            } else { 0 };
+        }
         // libm has a separate SONAME/version contract. No libc struct API is
         // allowed through this branch, and numeric code uses its C prototype.
         if !library.is_null() && CStr::from_ptr(library) == c"libm.so" {
@@ -111,14 +120,31 @@ pub extern "C" fn rudroid_plugin_init(api: Option<&'static rudroid_common::host_
     paths::install(api);
     #[cfg(all(target_os="linux",target_arch="aarch64",target_env="gnu"))]
     {
-        unsafe extern "C" { fn rudroid_bionic_install_logger(log: Option<rudroid_common::host_api::LogFn>, diagnostics: i32); }
+        unsafe extern "C" {
+            fn rudroid_bionic_install_logger(log: Option<rudroid_common::host_api::LogFn>, diagnostics: i32);
+            fn rudroid_bionic_install_signal_diagnostics(diagnostics: i32);
+        }
         // SAFETY: the loader's log entry stays callable for the process and
         // consumes (never retains) the strings liblog hands it.
-        unsafe { rudroid_bionic_install_logger(Some(api.log), i32::from(rudroid_common::logging::diagnostics_enabled())) };
+        unsafe {
+            let diagnostics=i32::from(rudroid_common::logging::diagnostics_enabled());
+            rudroid_bionic_install_logger(Some(api.log),diagnostics);
+            rudroid_bionic_install_signal_diagnostics(diagnostics);
+        };
     }
     #[cfg(not(all(target_os="linux",target_arch="aarch64",target_env="gnu")))]
     let _ = api;
     0
+}
+
+/// Install only the explicitly opted-in, runtime-owned metadata observer.
+#[no_mangle]
+pub extern "C" fn rudroid_plugin_register_jni(api: Option<&rudroid_common::host_api::HostApiV0>)->std::ffi::c_int {
+    let Some(api)=api.filter(|api|api.abi_version==rudroid_common::host_api::HOST_API_VERSION) else {return -1;};
+    #[cfg(all(target_os="linux",target_arch="aarch64",target_env="gnu"))]
+    {sync_observation::register_jni(api)}
+    #[cfg(not(all(target_os="linux",target_arch="aarch64",target_env="gnu")))]
+    {let _=api;0}
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "aarch64", target_env = "gnu"))]

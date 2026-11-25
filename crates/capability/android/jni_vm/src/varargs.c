@@ -45,7 +45,7 @@ static int collect(void *method, va_list input, jvalue *out) {
 #define CALL(NAME, TYPE, SLOT) \
 TYPE rudroid_jni_##NAME##_v(void *env,void *object,void *method,va_list args) { \
     jvalue values[255]; \
-    if (!collect(method,args,values)) return (TYPE)0; \
+    if (!env || !collect(method,args,values)) return (TYPE)0; \
     void **table=*(void ***)env; \
     return ((TYPE (*)(void *,void *,void *,const jvalue *))table[SLOT])(env,object,method,values); \
 } \
@@ -76,7 +76,7 @@ CALL(new_object,void *,30)
 
 #define VOID_CALL(NAME,SLOT) \
 void rudroid_jni_##NAME##_v(void *env,void *object,void *method,va_list args) { \
-    jvalue values[255]; if (!collect(method,args,values)) return; \
+    jvalue values[255]; if (!env || !collect(method,args,values)) return; \
     void **table=*(void ***)env; \
     ((void (*)(void *,void *,void *,const jvalue *))table[SLOT])(env,object,method,values); \
 } \
@@ -90,7 +90,7 @@ VOID_CALL(static_void,143)
  * Rust validates its method provenance in the same A dispatcher. */
 #define NONVIRTUAL_CALL(NAME,TYPE,SLOT) \
 TYPE rudroid_jni_nonvirtual_##NAME##_v(void *env,void *object,void *clazz,void *method,va_list args) { \
-    jvalue values[255]; if (!collect(method,args,values)) return (TYPE)0; \
+    jvalue values[255]; if (!env || !collect(method,args,values)) return (TYPE)0; \
     void **table=*(void ***)env; \
     return ((TYPE (*)(void *,void *,void *,void *,const jvalue *))table[SLOT])(env,object,clazz,method,values); \
 } \
@@ -110,7 +110,7 @@ NONVIRTUAL_CALL(float,float,87)
 NONVIRTUAL_CALL(double,double,90)
 
 void rudroid_jni_nonvirtual_void_v(void *env,void *object,void *clazz,void *method,va_list args) {
-    jvalue values[255]; if (!collect(method,args,values)) return;
+    jvalue values[255]; if (!env || !collect(method,args,values)) return;
     void **table=*(void ***)env;
     ((void (*)(void *,void *,void *,void *,const jvalue *))table[93])(env,object,clazz,method,values);
 }

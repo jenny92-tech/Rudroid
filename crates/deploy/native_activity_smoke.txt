@@ -1,0 +1,5 @@
+# Minimal Deploy Selection for the native_activity EngineProfile smoke kit.
+# Integration tests may also assemble this set into a temp deploy dir.
+android_base
+android_elf_load
+engine_native_activity

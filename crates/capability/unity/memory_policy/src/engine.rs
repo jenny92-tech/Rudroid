@@ -2,7 +2,7 @@
 //! OUTPUT:  independently available low-memory notification, rooted unload and optional extra GC
 //! POS:    preserves standard callbacks when collector ABI or optional exports are unavailable
 
-use rudroid_common::il2cpp::{GcHandles, GcRoot, Il2cpp, Method, TYPE_BOOLEAN, TYPE_VOID};
+use rudroid_unity_common::il2cpp::{GcHandles, GcRoot, Il2cpp, Method, TYPE_BOOLEAN, TYPE_VOID};
 use std::ffi::c_void;
 use std::marker::PhantomData;
 
@@ -65,7 +65,7 @@ impl Engine {
         if crate::STOPPED.load(std::sync::atomic::Ordering::Acquire) {
             return Err("player stopping".into());
         }
-        let verified_abi = rudroid_common::il2cpp_abi::require_gc_handle_abi(&unity_version);
+        let verified_abi = rudroid_unity_common::il2cpp_abi::require_gc_handle_abi(&unity_version);
         let mut notify = None;
         for argc in [0, 1] {
             let Some(method) = api.method(application, c"CallLowMemory", argc) else {

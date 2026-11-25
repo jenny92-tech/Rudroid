@@ -13,4 +13,5 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rudroid-common = { path = "../../../../common" }
+rudroid-unity-common = { path = "../../common" }
 

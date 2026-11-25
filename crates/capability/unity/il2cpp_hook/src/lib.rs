@@ -19,7 +19,7 @@ use rudroid_common::arm64_detour::{self as arm64, Original};
 pub use arm64::HookShape;
 
 use std::collections::BTreeMap;
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_char, c_int, c_void};
 
 use rudroid_common::registry::RudroidModuleEvent;
 use rudroid_common::Kind;
@@ -83,79 +83,22 @@ struct PatchFields {
 }
 
 impl PatchFields {
-    /// Read one entry through the `HostConfig` object (in-process callers).
-    fn from_config(config: &HostConfig, index: usize) -> PatchFields {
+    fn read(config: &impl rudroid_common::config_reader::ConfigReader, index: usize) -> PatchFields {
         let key = |field: &str| format!("{PATCH_KEY}.{index}.{field}");
-        let string =
-            |name: &str, fallback: &str| -> String {
-                config
-                    .get_string(name, fallback)
-                    .unwrap_or_else(|| fallback.to_owned())
-            };
         PatchFields {
-            assembly: string(&key("assembly"), "Assembly-CSharp"),
-            namespace: string(&key("namespace"), ""),
-            class: string(&key("class"), ""),
-            method: string(&key("method"), ""),
-            argument_count: config.get_i64(&key("argc"), 0),
-            object_argument: config.get_i64(&key("arg"), 0),
-            field: config.get_i64(&key("field"), -1),
-            multiplier: config.get_f64(&key("mult"), 1.0),
-            mode: string(&key("mode"), "scale"),
-            source_field: config.get_i64(&key("src_field"), -1),
-            value: config.get_f64(&key("setval"), 0.0),
-            integer_field: string(&key("type"), "f32") == "i32",
-            enabled: config.get_bool(&key("enabled"), true),
-        }
-    }
-
-    /// Read one entry through the Host API v0 getters — the exact
-    /// consumption path of the reference plugin, which also only sees
-    /// dotted-key getters (`config_string`/`config_i32`/... helpers with a
-    /// 512-byte scratch buffer).
-    fn from_host_api(api: &HostApiV0, index: usize) -> PatchFields {
-        let key = |field: &str| format!("{PATCH_KEY}.{index}.{field}");
-        fn read_string(api: &HostApiV0, key: &str, fallback: &str) -> String {
-            // Keys are generated from fixed field names, fallbacks are
-            // literals: neither contains NUL.
-            let Ok(key) = CString::new(key) else {
-                return fallback.to_owned();
-            };
-            // An absent key reads as the fallback, as the getter's own copy did.
-            api.config_string(&key, 512)
-                .unwrap_or_else(|| fallback.to_owned())
-        }
-        fn read_i64(api: &HostApiV0, key: &str, fallback: i64) -> i64 {
-            keyed(key, |key| api.config_i64(key, fallback))
-        }
-        fn read_f64(api: &HostApiV0, key: &str, fallback: f64) -> f64 {
-            keyed(key, |key| api.config_f64(key, fallback))
-        }
-        fn read_bool(api: &HostApiV0, key: &str, fallback: bool) -> bool {
-            keyed(key, |key| api.config_bool(key, fallback))
-        }
-        fn keyed<T>(key: &str, call: impl FnOnce(&CString) -> T) -> T {
-            match CString::new(key) {
-                Ok(key) => call(&key),
-                // Generated keys are always NUL-free; the arm only keeps the
-                // helper total.
-                Err(_) => call(&CString::default()),
-            }
-        }
-        PatchFields {
-            assembly: read_string(api, &key("assembly"), "Assembly-CSharp"),
-            namespace: read_string(api, &key("namespace"), ""),
-            class: read_string(api, &key("class"), ""),
-            method: read_string(api, &key("method"), ""),
-            argument_count: read_i64(api, &key("argc"), 0),
-            object_argument: read_i64(api, &key("arg"), 0),
-            field: read_i64(api, &key("field"), -1),
-            multiplier: read_f64(api, &key("mult"), 1.0),
-            mode: read_string(api, &key("mode"), "scale"),
-            source_field: read_i64(api, &key("src_field"), -1),
-            value: read_f64(api, &key("setval"), 0.0),
-            integer_field: read_string(api, &key("type"), "f32") == "i32",
-            enabled: read_bool(api, &key("enabled"), true),
+            assembly: config.text(&key("assembly"), "Assembly-CSharp"),
+            namespace: config.text(&key("namespace"), ""),
+            class: config.text(&key("class"), ""),
+            method: config.text(&key("method"), ""),
+            argument_count: config.integer(&key("argc"), 0),
+            object_argument: config.integer(&key("arg"), 0),
+            field: config.integer(&key("field"), -1),
+            multiplier: config.number(&key("mult"), 1.0),
+            mode: config.text(&key("mode"), "scale"),
+            source_field: config.integer(&key("src_field"), -1),
+            value: config.number(&key("setval"), 0.0),
+            integer_field: config.text(&key("type"), "f32") == "i32",
+            enabled: config.boolean(&key("enabled"), true),
         }
     }
 }
@@ -271,7 +214,7 @@ impl HookRegistry {
             if registry.patches.len() == MAX_PATCHES {
                 break;
             }
-            let fields = PatchFields::from_config(config, index);
+            let fields = PatchFields::read(config, index);
             if let Some(request) = PatchRequest::from_fields(
                 format!("{PATCH_KEY}.{index}"),
                 fields,
@@ -294,7 +237,7 @@ impl HookRegistry {
             if registry.patches.len() == MAX_PATCHES {
                 break;
             }
-            let fields = PatchFields::from_host_api(api, index);
+            let fields = PatchFields::read(api, index);
             if let Some(request) = PatchRequest::from_fields(
                 format!("{PATCH_KEY}.{index}"),
                 fields,
@@ -639,18 +582,28 @@ fn copy_host_api(api: &HostApiV0) -> HostApiV0 {
 /// event. A duplicate subscription is the registry's first-write-wins
 /// rejection (returns -3 like every other registration failure).
 fn arm_il2cpp_ready_producer(api: &HostApiV0, log: &dyn Fn(&str)) -> c_int {
-    if PRODUCER_API.set(copy_host_api(api)).is_err() {
-        log("il2cpp-ready producer already armed (first-write-wins)");
-        return 0;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    const REGISTERING: u8 = 1;
+    const MAPPED: u8 = 2;
+    const READY: u8 = 3;
+    static STAGE: AtomicU8 = AtomicU8::new(0);
+    let previous = STAGE.load(Ordering::Acquire);
+    if previous == READY { return 0; }
+    if previous == REGISTERING || STAGE.compare_exchange(previous, REGISTERING, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return -3;
     }
-    if !api.on_module_loaded(ModuleKind::Il2cpp, on_il2cpp_mapped, std::ptr::null_mut()) {
+    PRODUCER_API.get_or_init(|| copy_host_api(api));
+    if previous != MAPPED && !api.on_module_loaded(ModuleKind::Il2cpp, on_il2cpp_mapped, std::ptr::null_mut()) {
+        STAGE.store(0, Ordering::Release);
         log("module subscription rejected — il2cpp-ready producer not armed");
         return -3;
     }
     if !api.on_module_loaded(ModuleKind::UnityStopping, configured::stopping, std::ptr::null_mut()) {
+        STAGE.store(MAPPED, Ordering::Release);
         log("stop subscription rejected — configured hook shutdown unavailable");
         return -3;
     }
+    STAGE.store(READY, Ordering::Release);
     log("il2cpp-ready producer armed: waiting for the il2cpp module (ticket 78)");
     0
 }
@@ -669,13 +622,15 @@ extern "C" fn on_il2cpp_mapped(event: Option<&RudroidModuleEvent>, _user: *mut c
     let Some(api) = PRODUCER_API.get() else {
         return;
     };
-    configured::mapped(event.base as usize);
     let Some(entry) = api.guest_symbol(event.base, c"il2cpp_init") else {
         producer_log(
             "il2cpp_init export missing — Il2cppReady will not fire (metadata-dependent hooks stay off)",
         );
         return;
     };
+    static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLING.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+    configured::mapped(event.base as usize);
     let mut registry = HookRegistry::default();
     registry.register_request("il2cpp_init", "il2cpp_init");
     if registry.resolve("il2cpp_init", entry).is_err() {

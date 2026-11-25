@@ -112,6 +112,11 @@ def audit_elf(data: bytes, maximum: str = DEFAULT_GLIBC_MAX) -> dict:
                     if not name or "/" in name or "\\" in name:
                         raise AbiError(f"nonportable DT_NEEDED path: {name!r}")
                     needed.append(name)
+                elif tag in (15, 29):  # DT_RPATH / DT_RUNPATH
+                    rpath = elf.string(strings, value)
+                    for entry in rpath.split(":"):
+                        if entry and not (entry == "$ORIGIN" or entry.startswith("$ORIGIN/")):
+                            raise AbiError(f"nonportable DT_RPATH/DT_RUNPATH entry: {entry!r}")
             if not terminated:
                 raise AbiError("unterminated dynamic table")
         elif section[1] == 0x6ffffffe:  # SHT_GNU_verneed
@@ -213,8 +218,22 @@ def main() -> int:
         version_tuple(args.max_glibc)
         if args.dir is not None and not args.dir.is_dir():
             raise AbiError(f"not a directory: {args.dir}")
-        paths = args.file + (sorted(p for p in args.dir.iterdir() if p.is_file() and
-                            (p.suffix == ".so" or p.name == "rudroid-unity-loader")) if args.dir else [])
+        dir_paths = []
+        if args.dir:
+            for candidate in sorted(args.dir.iterdir()):
+                if candidate.is_file() and (
+                    candidate.suffix == ".so"
+                    or candidate.name
+                    in ("rudroid-unity-loader", "rudroid-loader", "unityloader")
+                ):
+                    dir_paths.append(candidate)
+            for subname in ("plugins", "gamepatchs"):
+                subdir = args.dir / subname
+                if subdir.is_dir():
+                    for candidate in sorted(subdir.iterdir()):
+                        if candidate.is_file() and candidate.suffix == ".so":
+                            dir_paths.append(candidate)
+        paths = args.file + dir_paths
         if not paths:
             raise AbiError("no Linux kit files to audit")
         if len({p.name for p in paths}) != len(paths):

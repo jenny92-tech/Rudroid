@@ -138,6 +138,7 @@ fn versioned_guest_heap_and_stdio_share_host_services() {
             "lseek",
             "nanosleep",
             "open",
+            "open64", "openat64", "pread64", "pwrite64", "ftruncate64", "srand", "rand", "unlinkat",
             "opendir",
             "pwrite",
             "read",
@@ -246,7 +247,7 @@ fn versioned_guest_heap_and_stdio_share_host_services() {
             + "unsigned char __sF[456]; void *stdin, *stdout, *stderr;\n",
     )
     .unwrap();
-    fs::write(root.join("versions.map"), "LIBC { global: prctl; ptrace; process_vm_readv; getpid; setjmp; _setjmp; sigsetjmp; longjmp; _longjmp; siglongjmp; sigemptyset; sigaddset; sigismember; sigprocmask; sigaction; sigaltstack; raise; sem_init; sem_destroy; sem_post; sem_wait; sem_trywait; sem_getvalue; sem_timedwait; socketpair; send; recv; sendmsg; recvmsg; select; __FD_SET_chk; __FD_ISSET_chk; fcntl; getaddrinfo; freeaddrinfo; getnameinfo; inet_pton; inet_ntop; statfs; uname; ldiv; malloc; calloc; realloc; free; posix_memalign; memalign; malloc_usable_size; pthread_barrier_wait; __register_atfork; fork; waitpid; _exit; strstr; newlocale; duplocale; freelocale; uselocale; setlocale; localeconv; __ctype_get_mb_cur_max; mbsinit; mbrtowc; mbrlen; mbsnrtowcs; mbsrtowcs; wcsnrtombs; wcrtomb; iswalpha_l; iswlower_l; towlower_l; strcoll_l; strtoll_l; strtold_l; pathconf; fpathconf; statvfs; fstatvfs; __system_property_get; __system_property_find; __system_property_read; strerror_r; __gnu_strerror_r; pipe; write; ioctl; fgetwc; fputwc; ungetwc; fwide; clock_getres; clock_gettime; close; closedir; fdopendir; fstat; getauxval; getpagesize; gmtime_r; lseek; nanosleep; open; opendir; pwrite; read; readdir; stat; strtold; swprintf; sysconf; wcstold; pthread_attr_destroy; pthread_attr_getstack; pthread_attr_init; pthread_attr_setstacksize; pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_timedwait; pthread_cond_wait; pthread_create; pthread_equal; pthread_getattr_np; pthread_getspecific; pthread_join; pthread_key_create; pthread_key_delete; pthread_mutex_destroy; pthread_mutex_init; pthread_mutex_lock; pthread_mutex_trylock; pthread_mutex_unlock; pthread_mutexattr_destroy; pthread_mutexattr_init; pthread_mutexattr_setpshared; pthread_mutexattr_settype; pthread_once; pthread_rwlock_destroy; pthread_rwlock_rdlock; pthread_rwlock_trywrlock; pthread_rwlock_unlock; pthread_rwlock_wrlock; pthread_self; pthread_setspecific; pthread_sigmask; __cxa_atexit; __cxa_finalize; __cxa_thread_atexit_impl; __sF; stdin; stdout; stderr; fopen; fdopen; tmpfile; fclose; fflush; fileno; fread; fwrite; fseek; ftell; fgetpos; fsetpos; fgetc; fputc; ungetc; fputs; feof; ferror; fgets; clearerr; rewind; setbuf; setvbuf; flockfile; funlockfile; ftrylockfile; fprintf; fscanf; vfprintf; vfscanf; vsnprintf; vsscanf; vasprintf; printf; vprintf; puts; putchar; memcpy; memmove; memset; memcmp; strlen; strlcpy; strlcat; strdup; strndup; strcmp; strtol; strtod; __errno; gettid; syscall; qsort; bsearch; local: *; };\nLIBC_N { global: fopen64; fseeko64; ftello64; } LIBC;\nLIBC_P { global: aligned_alloc; } LIBC_N;\n").unwrap();
+    fs::write(root.join("versions.map"), "LIBC { global: prctl; ptrace; process_vm_readv; getpid; setjmp; _setjmp; sigsetjmp; longjmp; _longjmp; siglongjmp; sigemptyset; sigaddset; sigismember; sigprocmask; sigaction; sigaltstack; raise; sem_init; sem_destroy; sem_post; sem_wait; sem_trywait; sem_getvalue; sem_timedwait; socketpair; send; recv; sendmsg; recvmsg; select; __FD_SET_chk; __FD_ISSET_chk; fcntl; getaddrinfo; freeaddrinfo; getnameinfo; inet_pton; inet_ntop; statfs; uname; ldiv; malloc; calloc; realloc; free; posix_memalign; memalign; malloc_usable_size; pthread_barrier_wait; __register_atfork; fork; waitpid; _exit; strstr; newlocale; duplocale; freelocale; uselocale; setlocale; localeconv; __ctype_get_mb_cur_max; mbsinit; mbrtowc; mbrlen; mbsnrtowcs; mbsrtowcs; wcsnrtombs; wcrtomb; iswalpha_l; iswlower_l; towlower_l; strcoll_l; strtoll_l; strtold_l; pathconf; fpathconf; statvfs; fstatvfs; __system_property_get; __system_property_find; __system_property_read; strerror_r; __gnu_strerror_r; pipe; write; ioctl; fgetwc; fputwc; ungetwc; fwide; clock_getres; clock_gettime; close; closedir; fdopendir; fstat; getauxval; getpagesize; gmtime_r; lseek; nanosleep; open; open64; openat64; pread64; pwrite64; ftruncate64; srand; rand; unlinkat; opendir; pwrite; read; readdir; stat; strtold; swprintf; sysconf; wcstold; pthread_attr_destroy; pthread_attr_getstack; pthread_attr_init; pthread_attr_setstacksize; pthread_cond_broadcast; pthread_cond_destroy; pthread_cond_timedwait; pthread_cond_wait; pthread_create; pthread_equal; pthread_getattr_np; pthread_getspecific; pthread_join; pthread_key_create; pthread_key_delete; pthread_mutex_destroy; pthread_mutex_init; pthread_mutex_lock; pthread_mutex_trylock; pthread_mutex_unlock; pthread_mutexattr_destroy; pthread_mutexattr_init; pthread_mutexattr_setpshared; pthread_mutexattr_settype; pthread_once; pthread_rwlock_destroy; pthread_rwlock_rdlock; pthread_rwlock_trywrlock; pthread_rwlock_unlock; pthread_rwlock_wrlock; pthread_self; pthread_setspecific; pthread_sigmask; __cxa_atexit; __cxa_finalize; __cxa_thread_atexit_impl; __sF; stdin; stdout; stderr; fopen; fdopen; tmpfile; fclose; fflush; fileno; fread; fwrite; fseek; ftell; fgetpos; fsetpos; fgetc; fputc; ungetc; fputs; feof; ferror; fgets; clearerr; rewind; setbuf; setvbuf; flockfile; funlockfile; ftrylockfile; fprintf; fscanf; vfprintf; vfscanf; vsnprintf; vsscanf; vasprintf; printf; vprintf; puts; putchar; memcpy; memmove; memset; memcmp; strlen; strlcpy; strlcat; strdup; strndup; strcmp; strtol; strtod; __errno; gettid; syscall; qsort; bsearch; local: *; };\nLIBC_N { global: fopen64; fseeko64; ftello64; } LIBC;\nLIBC_P { global: aligned_alloc; } LIBC_N;\n").unwrap();
     compile(&[
         "-shared",
         "-fPIC",
@@ -301,8 +302,8 @@ fn versioned_guest_heap_and_stdio_share_host_services() {
     fs::write(root.join("jump.c"), include_str!("fixtures/bionic_jump.c")).unwrap();
     fs::write(root.join("jump_regs.S"), include_str!("fixtures/bionic_jump_regs.S")).unwrap();
     fs::write(root.join("math.c"), include_str!("fixtures/bionic_math.c")).unwrap();
-    fs::write(root.join("mathstub.c"), "void sin(void) {} void cos(void) {} void pow(void) {} void modf(void) {} void ldexp(void) {} void sqrtf(void) {} void nexttowardf(void) {} void atan2f(void) {} void sincos(void) {}\n").unwrap();
-    fs::write(root.join("mathversions.map"), "LIBC { global: sin; cos; pow; modf; ldexp; sqrtf; nexttowardf; atan2f; sincos; local: *; };\n").unwrap();
+    fs::write(root.join("mathstub.c"), "void sin(void) {} void cos(void) {} void pow(void) {} void modf(void) {} void ldexp(void) {} void sqrtf(void) {} void nexttowardf(void) {} void atan2f(void) {} void sincos(void) {} void fmin(void) {} void fmax(void) {} void fminf(void) {} void fmaxf(void) {}\n").unwrap();
+    fs::write(root.join("mathversions.map"), "LIBC { global: sin; cos; pow; modf; ldexp; sqrtf; nexttowardf; atan2f; sincos; fmin; fmax; fminf; fmaxf; local: *; };\n").unwrap();
     compile(&["-shared","-fPIC","-nostdlib","-Wl,-soname,libm.so",
         "-Wl,--version-script=mathversions.map","mathstub.c","-o","mathstub.so"]);
     compile(&[
@@ -353,12 +354,15 @@ fn versioned_guest_heap_and_stdio_share_host_services() {
     ]);
     let capabilities = unsafe { load_deploy_dir(&kit, &Selection::All) }.unwrap();
     let plan = guest::GuestPlan {
+                reserved_paths: vec![],
+        defer_jni_on_load: vec![],
         game_files: root.clone(),
+        preload: Vec::new(),
         entries: vec![guest::GuestEntry {
             kind: Some(ModuleKind::Main),
             relative_path: "guest.so",
             required: true,
-            gates: &[],
+            gates: vec![],
         }],
     };
     let elf = capabilities
@@ -424,6 +428,13 @@ fn versioned_guest_heap_and_stdio_share_host_services() {
         assert!(records
             .iter()
             .any(|entry| entry.0 == "__cxa_thread_atexit_impl"));
+        for (library, names) in [("libc.so", &["open64", "openat64", "pread64", "pwrite64", "ftruncate64", "srand"][..]),
+            ("libm.so", &["fmin", "fmax", "fminf", "fmaxf"][..])] {
+            for name in names {
+                assert!(records.iter().any(|entry| entry.0 == *name && entry.1.as_deref() == Some(library)
+                    && entry.2.as_deref() == Some("LIBC")), "missing versioned guest import {name}@LIBC/{library}");
+            }
+        }
         assert_eq!(visit(path.as_ptr(), None, std::ptr::null_mut()), -1);
         let invalid = CString::new(root.join("stub.c").to_str().unwrap()).unwrap();
         assert_eq!(

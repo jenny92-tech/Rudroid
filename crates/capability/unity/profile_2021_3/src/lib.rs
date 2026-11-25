@@ -27,11 +27,12 @@ use std::sync::OnceLock;
 
 use rudroid_common::arm64_detour::Original;
 use rudroid_common::host_api::HostApiV0;
-use rudroid_common::registry::{RudroidModuleEvent, RUDROID_UNITY_PROFILE_NONE};
+use rudroid_common::registry::RudroidModuleEvent;
+use rudroid_unity_common::RUDROID_UNITY_PROFILE_NONE;
 use rudroid_common::ModuleKind;
 use rudroid_unity_player_lifecycle::{self as lifecycle, Profile, Spec, INIT_JNI_CONTEXT};
 
-rudroid_common::declare_descriptor!(ENGINE_SPEC.id, rudroid_common::Kind::UnityProfile);
+rudroid_common::declare_descriptor!(ENGINE_SPEC.id, rudroid_common::Kind::EngineProfile);
 
 /// Engine specification — the reference fields mirror `unity_engine::Spec`
 /// for unity_2021_3 (`projects/unityloader/plugins/unity_2021_3`).

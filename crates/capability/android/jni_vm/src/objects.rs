@@ -129,7 +129,8 @@ impl Session {
             self.retain_edge(target);
             Some(target)
         };
+        let mut live = self.liveness.lock().unwrap();
         let previous = std::mem::replace(&mut self.arrays.lock().unwrap().get_mut(&id).unwrap().elements[index], target);
-        if let Some(previous) = previous { self.release_target_inner(previous, true); }
+        if let Some(previous) = previous { self.release_locked(&mut live, previous, true); }
     }
 }

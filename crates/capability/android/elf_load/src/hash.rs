@@ -1,3 +1,6 @@
+//! INPUT: mapped GNU and System V hash metadata and symbol names
+//! OUTPUT: bounded candidate symbol indices
+//! POS: dynamic lookup primitives for ELF images
 //! Dynamic symbol lookup through SYSV and GNU hash tables.
 #![forbid(unsafe_code)]
 
@@ -63,14 +66,16 @@ impl<'a> SysvTable<'a> {
         if raw.len() < (nbuckets + nchain) * 4 + 8 {
             return Err(ElfError::TruncatedSection("DT_HASH"));
         }
-        Ok(SysvTable { raw, nbuckets, nchain })
+        Ok(SysvTable {
+            raw,
+            nbuckets,
+            nchain,
+        })
     }
 
     pub fn lookup(&self, name: &str, name_of: &SymbolName<'_>) -> Result<Option<usize>, ElfError> {
-        let mut index = u32_at(
-            self.raw,
-            8 + (sysv_hash(name) as usize % self.nbuckets) * 4,
-        )? as usize;
+        let mut index =
+            u32_at(self.raw, 8 + (sysv_hash(name) as usize % self.nbuckets) * 4)? as usize;
         // A well-formed chain visits each of the `nchain` entries at most
         // once; one more step than that can only be a cycle.
         for _ in 0..=self.nchain {
@@ -82,6 +87,25 @@ impl<'a> SysvTable<'a> {
             }
             let chain = u32_at(self.raw, 8 + (self.nbuckets + index) * 4)?;
             index = chain as usize;
+        }
+        Err(ElfError::CyclicHashChain("DT_HASH"))
+    }
+
+    /// Every dynsym index whose name equals `name`. Versioned lookup needs
+    /// this because one bare name can have multiple `foo@VER` entries; the
+    /// first hash match may carry a different version.
+    pub fn lookup_all(&self, name: &str, name_of: &SymbolName<'_>) -> Result<Vec<usize>, ElfError> {
+        let mut index =
+            u32_at(self.raw, 8 + (sysv_hash(name) as usize % self.nbuckets) * 4)? as usize;
+        let mut matches = Vec::new();
+        for _ in 0..=self.nchain {
+            if index == 0 || index >= self.nchain {
+                return Ok(matches);
+            }
+            if name_of(index)? == name {
+                matches.push(index);
+            }
+            index = u32_at(self.raw, 8 + (self.nbuckets + index) * 4)? as usize;
         }
         Err(ElfError::CyclicHashChain("DT_HASH"))
     }
@@ -139,10 +163,7 @@ impl<'a> GnuTable<'a> {
     pub fn lookup(&self, name: &str, name_of: &SymbolName<'_>) -> Result<Option<usize>, ElfError> {
         let h = gnu_hash(name);
         // Bloom filter (ELF64: 8-byte words).
-        let bloom_word = u64_at(
-            self.raw,
-            16 + (h as usize / 64 % self.bloom_size) * 8,
-        )?;
+        let bloom_word = u64_at(self.raw, 16 + (h as usize / 64 % self.bloom_size) * 8)?;
         let bit = 1u64 << (h % 64);
         // Mask the shift amount: a hostile bloom_shift >= 32 must not shift a
         // u32 by more than its width (ticket 47).
@@ -151,15 +172,20 @@ impl<'a> GnuTable<'a> {
             return Ok(None);
         }
 
-        let bucket = u32_at(self.raw, self.buckets_offset() + (h as usize % self.nbuckets) * 4)?
-            as usize;
+        let bucket = u32_at(
+            self.raw,
+            self.buckets_offset() + (h as usize % self.nbuckets) * 4,
+        )? as usize;
         if bucket < self.symoffset {
             return Ok(None);
         }
 
         let mut index = bucket;
         loop {
-            let chain = u32_at(self.raw, self.chains_offset() + (index - self.symoffset) * 4)?;
+            let chain = u32_at(
+                self.raw,
+                self.chains_offset() + (index - self.symoffset) * 4,
+            )?;
             if chain | 1 == h | 1 {
                 if name_of(index)? == name {
                     return Ok(Some(index));
@@ -167,6 +193,43 @@ impl<'a> GnuTable<'a> {
             }
             if chain & 1 == 1 {
                 return Ok(None);
+            }
+            index += 1;
+        }
+    }
+
+    /// Every chain entry with the requested name and hash. The hash-chain
+    /// terminator bounds the walk; `u32_at` bounds every read to the parsed
+    /// table slice, so a hostile chain cannot escape the mapped ELF bytes.
+    pub fn lookup_all(&self, name: &str, name_of: &SymbolName<'_>) -> Result<Vec<usize>, ElfError> {
+        let h = gnu_hash(name);
+        let bloom_word = u64_at(self.raw, 16 + (h as usize / 64 % self.bloom_size) * 8)?;
+        let bit = 1u64 << (h % 64);
+        let second_bit = 1u64 << ((h >> (self.bloom_shift % 32)) % 64);
+        if bloom_word & bit == 0 || bloom_word & second_bit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let bucket = u32_at(
+            self.raw,
+            self.buckets_offset() + (h as usize % self.nbuckets) * 4,
+        )? as usize;
+        if bucket < self.symoffset {
+            return Ok(Vec::new());
+        }
+
+        let mut matches = Vec::new();
+        let mut index = bucket;
+        loop {
+            let chain = u32_at(
+                self.raw,
+                self.chains_offset() + (index - self.symoffset) * 4,
+            )?;
+            if chain | 1 == h | 1 && name_of(index)? == name {
+                matches.push(index);
+            }
+            if chain & 1 == 1 {
+                return Ok(matches);
             }
             index += 1;
         }

@@ -54,7 +54,6 @@ symbol_provider! {
     b"bsearch" => libc::bsearch as *const () as usize,
     b"__errno" => libc::__errno_location as *const () as usize,
     b"gettid" => gettid as *const () as usize,
-    b"syscall" => libc::syscall as *const () as usize,
     b"getpid" => libc::getpid as *const () as usize,
     b"getppid" => libc::getppid as *const () as usize,
     b"getuid" => libc::getuid as *const () as usize,

@@ -1,3 +1,6 @@
+//! INPUT: loader host table and configured reply catalog
+//! OUTPUT: registered provider for unresolved guest JNI methods
+//! POS: Android reply catalog capability
 //! rudroid-android-reply-catalog: fixed JNI replies as a same-build binary
 //! blob (class/method/signature → value), never TOML, no encryption.
 //!

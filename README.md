@@ -2,8 +2,13 @@
 
 Rudroid runs ARM64 Android Unity native libraries on ARM64 Linux through a thin
 Rust loader and optional capabilities for ELF, Bionic, JNI, graphics, audio and input.
-The implementation lives in [crates/](crates/AGENTS.md); the separate Bogodroid C++
-repository is a read-only behavioral reference.
+For a desktop Mono game, use the [offline tools](tools/README.md#桌面-unity-移植准备)
+to check and prepare its files. On the handheld, run `unityloader <config.toml>`
+with the [ARM64 Mono runtime](crates/docs/UNITY-MONO.md) enabled.
+
+The implementation lives in [crates/](crates/AGENTS.md). Bogodroid is the separate
+[knowledge base](https://github.com/jenny92-tech/Bogodroid); historical C++ behavior
+references remain in its Git history rather than a sibling source tree.
 
 Rudroid's first-party code is available for **noncommercial use**. Distributing
 source or binaries, or providing network access to a modified version, requires
@@ -29,8 +34,7 @@ The 1 GiB device still shows substantial swapping and loading stalls in Silksong
 and Vampire Survivors. These checks establish short playable paths; backend and
 thread-placement gains depend on the measured device and scene. See
 [performance decisions](crates/docs/PERFORMANCE-AUDIT.md) and [acceptance](crates/docs/ACCEPTANCE.md)
-for exact kits, firmware and remaining limits. ARM32, Unity Mono and R36S remain
-unverified.
+for exact kits, firmware and remaining limits. ARM32 and R36S remain unverified.
 
 ## Documentation
 

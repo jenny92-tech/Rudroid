@@ -10,23 +10,49 @@ static DEV_DESTROYED: AtomicUsize = AtomicUsize::new(0);
 static EXPORTED: AtomicUsize = AtomicUsize::new(0);
 static BAD_LAYOUT: AtomicUsize = AtomicUsize::new(0);
 static STRIDE: AtomicUsize = AtomicUsize::new(2560);
+static CREATE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static CREATE_ERRNO: AtomicUsize = AtomicUsize::new(0);
+static EXPORT_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static EXPORT_ERRNO: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "C" fn new_device(_: i32) -> Handle { 1usize as Handle }
 unsafe extern "C" fn destroy_device(_: Handle) { DEV_DESTROYED.fetch_add(1, Ordering::Relaxed); }
 unsafe extern "C" fn create(_: Handle, _: u32, _: u32, _: u32, _: *const u64, _: u32) -> Handle {
-    CREATED.fetch_add(1, Ordering::Relaxed); 2usize as Handle
+    let call = CREATED.fetch_add(1, Ordering::Relaxed);
+    if call < CREATE_FAILURES.load(Ordering::Relaxed) {
+        let error = CREATE_ERRNO.load(Ordering::Relaxed);
+        if error != 0 {
+            // SAFETY: native GNU errno is writable only by this test thread.
+            unsafe { *__errno_location() = error as i32 };
+        }
+        std::ptr::null_mut()
+    } else { 2usize as Handle }
 }
-unsafe extern "C" fn destroy(_: Handle) { DESTROYED.fetch_add(1, Ordering::Relaxed); }
+unsafe extern "C" fn destroy(_: Handle) {
+    DESTROYED.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: this thread owns errno. Model cleanup clobbering the failure
+    // errno so classification must capture it before the BO is dropped.
+    unsafe { *__errno_location() = 5 };
+}
 unsafe extern "C" fn modifier(_: Handle) -> u64 { BAD_LAYOUT.load(Ordering::Relaxed) as u64 }
 unsafe extern "C" fn format(_: Handle) -> u32 { 0x34324241 }
 unsafe extern "C" fn planes(_: Handle) -> i32 { 1 }
 unsafe extern "C" fn stride(_: Handle) -> u32 { STRIDE.load(Ordering::Relaxed) as u32 }
 unsafe extern "C" fn offset(_: Handle, _: i32) -> u32 { 0 }
 unsafe extern "C" fn export(_: Handle) -> i32 {
-    EXPORTED.fetch_add(1, Ordering::Relaxed);
+    let call = EXPORTED.fetch_add(1, Ordering::Relaxed);
+    if call < EXPORT_FAILURES.load(Ordering::Relaxed) {
+        let error = EXPORT_ERRNO.load(Ordering::Relaxed);
+        if error != 0 {
+            // SAFETY: native GNU errno is writable only by this test thread.
+            unsafe { *__errno_location() = error as i32 };
+        }
+        return -1;
+    }
     File::open("/dev/null").unwrap().into_raw_fd()
 }
 fn owner() -> Box<Allocator> {
-    for counter in [&CREATED, &DESTROYED, &DEV_DESTROYED, &EXPORTED, &BAD_LAYOUT] { counter.store(0, Ordering::Relaxed); }
+    for counter in [&CREATED, &DESTROYED, &DEV_DESTROYED, &EXPORTED, &BAD_LAYOUT,
+        &CREATE_FAILURES, &CREATE_ERRNO, &EXPORT_FAILURES, &EXPORT_ERRNO] { counter.store(0, Ordering::Relaxed); }
     STRIDE.store(2560, Ordering::Relaxed);
     let gbm = Box::leak(Box::new(Gbm { _library: libloading::os::unix::Library::this().into(),
         create_device: new_device, destroy_device, create, destroy, modifier, format, planes, stride, offset, fd: export }));
@@ -105,6 +131,87 @@ fn subsequent_images_must_keep_the_first_images_stride() {
         assert_eq!(DESTROYED.load(Ordering::Relaxed), 3);
         drop(OwnedFd::from_raw_fd(first.buffer_fds[0]));
         drop(OwnedFd::from_raw_fd(next.buffer_fds[0]));
+        wsialloc_delete(owner);
+    }
+}
+
+#[test]
+fn create_and_export_failures_keep_real_resource_evidence_and_fd_ownership() {
+    let _serial = SERIAL.lock().unwrap();
+    for export_failure in [false, true] {
+        for error in [0, 1, 5, 11, 12, 22, 23, 24, 28, 95] {
+            let owner = Box::into_raw(owner());
+            if export_failure {
+                EXPORT_FAILURES.store(usize::MAX, Ordering::Relaxed);
+                EXPORT_ERRNO.store(error, Ordering::Relaxed);
+            } else {
+                CREATE_FAILURES.store(usize::MAX, Ordering::Relaxed);
+                CREATE_ERRNO.store(error, Ordering::Relaxed);
+            }
+            let format = Format { fourcc: 0x34324241, ..Format::default() };
+            let info = AllocateInfo { formats: &format, format_count: 1, width: 640, height: 480, flags: 0 };
+            let mut result = AllocateResult::default();
+            // SAFETY: unique fake owner and guarded native inputs; failed calls
+            // transfer no fd. Seed stale ENOMEM to detect an uncleared errno.
+            unsafe {
+                *__errno_location() = 12;
+                let expected = if [11, 12, 23, 24, 28].contains(&error) { -3 } else { -2 };
+                assert_eq!(wsialloc_alloc(owner, &info, &mut result), expected, "export={export_failure} errno={error}");
+                assert_eq!(result.buffer_fds, [-1; 4]);
+                assert_eq!(DESTROYED.load(Ordering::Relaxed), usize::from(export_failure));
+                assert!((*owner).gate.lock().unwrap().is_none());
+                wsialloc_delete(owner);
+            }
+        }
+    }
+}
+
+#[test]
+fn later_candidates_can_succeed_after_resource_failure() {
+    let _serial = SERIAL.lock().unwrap();
+    for export_failure in [false, true] {
+        let owner = Box::into_raw(owner());
+        if export_failure {
+            EXPORT_FAILURES.store(1, Ordering::Relaxed);
+            EXPORT_ERRNO.store(24, Ordering::Relaxed);
+        } else {
+            CREATE_FAILURES.store(1, Ordering::Relaxed);
+            CREATE_ERRNO.store(12, Ordering::Relaxed);
+        }
+        let formats = [Format { fourcc: 0x34324241, ..Format::default() }; 2];
+        let info = AllocateInfo { formats: formats.as_ptr(), format_count: 2, width: 640, height: 480, flags: 0 };
+        let mut result = AllocateResult::default();
+        // SAFETY: one native lease per attempt; only the successful fd is owned
+        // by this caller, and all successful BOs must already be destroyed.
+        unsafe {
+            assert_eq!(wsialloc_alloc(owner, &info, &mut result), 0);
+            assert!(result.buffer_fds[0] >= 0);
+            assert_eq!(CREATED.load(Ordering::Relaxed), 2);
+            assert_eq!(DESTROYED.load(Ordering::Relaxed), if export_failure { 2 } else { 1 });
+            drop(OwnedFd::from_raw_fd(result.buffer_fds[0]));
+            wsialloc_delete(owner);
+        }
+    }
+}
+
+#[test]
+fn resource_evidence_survives_a_later_layout_rejection() {
+    let _serial = SERIAL.lock().unwrap();
+    let owner = Box::into_raw(owner());
+    CREATE_FAILURES.store(1, Ordering::Relaxed);
+    CREATE_ERRNO.store(12, Ordering::Relaxed);
+    let formats = [Format { fourcc: 0x34324241, ..Format::default() },
+        Format { fourcc: 0x34325241, ..Format::default() }];
+    let info = AllocateInfo { formats: formats.as_ptr(), format_count: 2, width: 640, height: 480, flags: 0 };
+    let mut result = AllocateResult::default();
+    // SAFETY: unique fake owner; the second BO rejects a returned format
+    // mismatch, and neither failed candidate transfers a descriptor.
+    unsafe {
+        assert_eq!(wsialloc_alloc(owner, &info, &mut result), -3);
+        assert_eq!(CREATED.load(Ordering::Relaxed), 2);
+        assert_eq!(DESTROYED.load(Ordering::Relaxed), 1);
+        assert_eq!(EXPORTED.load(Ordering::Relaxed), 0);
+        assert_eq!(result.buffer_fds, [-1; 4]);
         wsialloc_delete(owner);
     }
 }

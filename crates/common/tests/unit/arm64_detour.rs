@@ -248,12 +248,22 @@ mod live {
     use super::super::*;
     use super::{LDP_X29_X30_POST, NOP, STP_X29_X30_PRE};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     const RET: u32 = 0xD65F_03C0;
     const MOVZ_X0_5: u32 = 0xD280_00A0; // mov x0, #5
     const MOVZ_X0_9: u32 = 0xD280_0120; // mov x0, #9
     const ADRP_X0_P1: u32 = 0xB000_0000; // adrp x0, #+1 page
+
+    /// Live tests share the process address space and trampoline pool.
+    static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// One fresh RX page holding `words` at their byte offsets.
     fn code_page(words: &[(usize, u32)]) -> usize {
@@ -306,6 +316,7 @@ mod live {
 
     #[test]
     fn exact_trampoline_reservation_cannot_overwrite_an_existing_mapping() {
+        let _serial = serial();
         let length=page_size()*2;
         // SAFETY: this test owns the anonymous RW range and keeps it mapped during both collision attempts.
         unsafe {
@@ -330,6 +341,7 @@ mod live {
 
     #[test]
     fn sparse_near_trampoline_finds_a_single_page_between_dense_mappings() {
+        let _serial = serial();
         let length = 2 * BRANCH_RANGE_BYTES as usize + 4 * HUGE_PAGE;
         // SAFETY: private inaccessible reservation; the test owns every page.
         let mapping = unsafe { libc::mmap(std::ptr::null_mut(), length, libc::PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) };
@@ -369,6 +381,7 @@ mod live {
 
     #[test]
     fn quiescent_absolute_redirect_replays_all_four_entry_words() {
+        let _serial = serial();
         unsafe extern "C-unwind" fn replacement_unwind() -> u64 { 7 }
         let target = code_page(&[
             (0, MOVZ_X0_5),
@@ -390,7 +403,72 @@ mod live {
     }
 
     #[test]
+    fn tracked_quiescent_original_preserves_two_adrps_stack_and_full_transaction_rollback() {
+        let _serial = serial();
+        type Source = unsafe extern "C-unwind" fn(u64, u64) -> u64;
+        unsafe extern "C-unwind" fn alternate(a: u64, b: u64) -> u64 { a ^ b }
+        // Same two stack-save instructions as the getter; two distinct ADRPs
+        // must retain the ORIGINAL page base even in an arbitrary trampoline.
+        let saved = [0xa9be_57fe, 0xa901_4ff4, 0xb000_0013, 0xd000_0015];
+        let target = code_page(&[
+            (0, saved[0]), (4, saved[1]), (8, saved[2]), (12, saved[3]),
+            (16, 0x8b01_0000), // add x0, x0, x1
+            (20, 0x8b13_0000), // add x0, x0, x19
+            (24, 0x8b15_0000), // add x0, x0, x21
+            (28, 0xa941_4ff4), // ldp x20, x19, [sp, #16]
+            (32, 0xa8c2_57fe), // ldp x30, x21, [sp], #32
+            (36, RET),
+            (0x100, 0x8b01_0000), (0x104, RET),
+            (0x200, NOP), (0x204, 0x9400_0000), (0x208, NOP), (0x20c, NOP),
+        ]);
+        let near = Original::<Source>::new();
+        let wide = Original::<Source>::new();
+        let rejected = Original::<Source>::new();
+        // SAFETY: test owns all code and calls these exact integer ABIs only
+        // while idle. The mappings stay pinned for the original trampolines.
+        unsafe {
+            let original: Source = std::mem::transmute(target);
+            let simple: Source = std::mem::transmute(target + 0x100);
+            let expected = |a, b| a + b + ((target & !0xfff) + 0x1000) as u64
+                + ((target & !0xfff) + 0x2000) as u64;
+            assert_eq!(original(11, 31), expected(11, 31));
+            let first = near.install(target + 0x100, alternate).unwrap();
+            let second = wide.install_quiescent_tracked(target, alternate).unwrap();
+            assert_eq!(original(11, 31), 11 ^ 31);
+            assert_eq!(simple(11, 31), 11 ^ 31);
+            for (a, b) in [(11, 31), (23, 42)] {
+                assert_eq!(wide.get().unwrap()(a, b), expected(a, b),
+                    "two page addresses, arguments, saved registers and SP survive replay/return");
+            }
+            assert_eq!(std::slice::from_raw_parts(target as *const u32, 4), absolute_jump(alternate as usize));
+            let mut wrong = second.clone();
+            wrong.destination ^= 1usize << 32; // mismatch only the FOURTH word
+            assert!(restore_quiescent(&wrong).is_err());
+            assert_eq!(std::slice::from_raw_parts(target as *const u32, 4), absolute_jump(alternate as usize));
+            assert_eq!(original(11, 31), 11 ^ 31);
+
+            // A later transaction failure neither publishes an original nor
+            // alters that entry. Reverse rollback restores both patch widths.
+            rejected.set(alternate as usize);
+            assert!(matches!(rejected.install_quiescent_tracked(target + 0x200, alternate),
+                Err(DetourError::UnsupportedPrologue { .. })));
+            assert_eq!(rejected.address(), alternate as usize);
+            assert_eq!(std::slice::from_raw_parts((target + 0x200) as *const u32, 4),
+                [NOP, 0x9400_0000, NOP, NOP]);
+            restore_quiescent(&second).unwrap();
+            restore(&first).unwrap();
+            wide.clear(); near.clear(); rejected.clear();
+            assert_eq!(std::slice::from_raw_parts(target as *const u32, 4), saved);
+            assert_eq!(original(11, 31), expected(11, 31));
+            assert_eq!(simple(11, 31), 42);
+            assert!(restore_quiescent(&second).is_err(), "a restored record is stale");
+            assert!(wide.get().is_none() && near.get().is_none());
+        }
+    }
+
+    #[test]
     fn quiescent_conditional_originals_preserve_both_paths_flags_widths_and_test_bits(){
+        let _serial = serial();
         use super::NOP;
         unsafe extern "C-unwind" fn replacement_arg(_:u64)->u64{7}
         for (opcode,prefix,inputs,expected) in [
@@ -409,6 +487,7 @@ mod live {
 
     #[test]
     fn failed_four_word_seal_restores_every_covered_instruction() {
+        let _serial = serial();
         let words = [MOVZ_X0_5, 0x9100_0400, 0x9100_0400, 0x9100_0400];
         let address = code_page(&[
             (0, words[0]),
@@ -432,12 +511,15 @@ mod live {
             )
         };
         assert!(result.is_err());
+        // SAFETY: all four readable words belong to this still-owned mapping.
+        assert_eq!(unsafe { std::slice::from_raw_parts(address as *const u32, 4) }, words);
         assert_eq!(call(address), 8);
         unsafe { libc::munmap(address as *mut c_void, page_size()) };
     }
 
     #[test]
     fn checked_two_call_patch_changes_order_only_after_all_guards_match() {
+        let _serial = serial();
         let first = encode_bl(8, 0x40).unwrap();
         let second = encode_bl(12, 0x50).unwrap();
         let expected = [first, second];
@@ -475,6 +557,7 @@ mod live {
 
     #[test]
     fn failed_two_word_seal_rolls_back_the_entire_patch() {
+        let _serial = serial();
         let words = [MOVZ_X0_5, 0x9100_0400];
         let page = code_page(&[(0, words[0]), (4, words[1]), (8, RET)]);
         let mut calls = 0;
@@ -505,6 +588,7 @@ mod live {
 
     #[test]
     fn failed_seal_restores_the_original_instruction() {
+        let _serial = serial();
         for persistent in [false, true] {
             let address = code_page(&[(0, MOVZ_X0_5), (4, RET)]);
             let mut calls = 0;
@@ -526,6 +610,7 @@ mod live {
 
     #[test]
     fn unaligned_flush_covers_code_spanning_cache_lines() {
+        let _serial = serial();
         // The MOV/RET pair crosses typical 64/128/256-byte line ends.
         let page = code_page(&[(252, MOVZ_X0_5), (256, RET)]);
         for value in [MOVZ_X0_9, MOVZ_X0_5].into_iter().cycle().take(100) {
@@ -548,6 +633,7 @@ mod live {
 
     #[test]
     fn adrp_entry_is_detoured_and_the_trampoline_keeps_its_value() {
+        let _serial = serial();
         let page = code_page(&[(0, ADRP_X0_P1), (4, RET)]);
         let expected = (page & !0xFFF) + 0x1000;
         assert_eq!(call(page) as usize, expected);
@@ -568,6 +654,7 @@ mod live {
 
     #[test]
     fn failed_typed_install_preserves_the_previous_original_and_entry_word() {
+        let _serial = serial();
         let unsupported = 0x9400_0000; // BL cannot be relocated by the one-word installer.
         let page = code_page(&[(0, unsupported), (4, RET)]);
         let original = Original::<unsafe extern "C" fn() -> u64>::new();
@@ -589,6 +676,7 @@ mod live {
     /// execute permission faults that thread.
     #[test]
     fn patch_windows_keep_neighbours_and_live_trampolines_executable() {
+        let _serial = serial();
         let page = code_page(&[(0, MOVZ_X0_5), (4, RET), (0x100, MOVZ_X0_9), (0x104, RET)]);
         let neighbour = page + 0x100;
         let trampoline = Arc::new(AtomicUsize::new(0));

@@ -194,12 +194,12 @@ pub(super) unsafe extern "C" fn prepare(opts: c_int) -> *mut Looper {
     let key = match thread_key() { Ok(key) => key, Err(error) => { fail(error); return ptr::null_mut(); } };
     let existing = libc::pthread_getspecific(key).cast::<Looper>();
     if !existing.is_null() { return existing; }
-    let mut owned = match create(opts) { Ok(owned) => owned, Err(error) => { fail(error); return ptr::null_mut(); } };
-    let pointer = &mut *owned as *mut Looper;
+    let owned = match create(opts) { Ok(owned) => owned, Err(error) => { fail(error); return ptr::null_mut(); } };
+    let pointer = Box::into_raw(owned);
     let error = libc::pthread_setspecific(key, pointer.cast());
-    if error != 0 { drop(owned); fail(error); return ptr::null_mut(); }
+    if error != 0 { drop(Box::from_raw(pointer)); fail(error); return ptr::null_mut(); }
     // Native TLS retains the initial reference; its destructor returns it.
-    Box::into_raw(owned)
+    pointer
 }
 unsafe extern "C" fn wake(pointer: *mut Looper) {
     let Some(looper) = pointer.as_ref() else { return; };

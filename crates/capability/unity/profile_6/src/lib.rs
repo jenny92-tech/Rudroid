@@ -27,13 +27,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use rudroid_common::host_api::HostApiV0;
-use rudroid_common::registry::{RudroidModuleEvent, RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG};
+use rudroid_common::registry::RudroidModuleEvent;
+use rudroid_unity_common::RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG;
 use rudroid_common::ModuleKind;
 use rudroid_unity_player_lifecycle::{
     self as lifecycle, CallbackBody, PlayerCallback, Profile, Spec, INIT_JNI_CONTEXT_INT,
 };
 
-rudroid_common::declare_descriptor!(ENGINE_SPEC.id, rudroid_common::Kind::UnityProfile);
+rudroid_common::declare_descriptor!(ENGINE_SPEC.id, rudroid_common::Kind::EngineProfile);
 
 /// Engine ABI mirrors the reference `unity_engine::Spec` for unity_6
 /// (`projects/unityloader/plugins/unity_6`); pacing defaults have moved to
@@ -174,15 +175,8 @@ pub mod tls_guard {
     // The install caller still owns the image and excludes unmap/patch races.
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     fn readable(address: usize, len: usize) -> bool {
-        let Some(end) = address.checked_add(len) else { return false; };
-        let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else { return false; };
-        maps.lines().any(|line| {
-            let mut fields = line.split_whitespace();
-            let (Some(range), Some(permissions)) = (fields.next(), fields.next()) else { return false; };
-            let Some((start, stop)) = range.split_once('-') else { return false; };
-            let (Ok(start), Ok(stop)) = (usize::from_str_radix(start, 16), usize::from_str_radix(stop, 16)) else { return false; };
-            permissions.starts_with('r') && address >= start && end <= stop
-        })
+        rudroid_common::mapped_memory::MappedRegions::snapshot()
+            .is_ok_and(|regions| regions.contains(address, len, false))
     }
 
     /// Install the guard; returns the patched pattern address. Every

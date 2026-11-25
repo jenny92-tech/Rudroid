@@ -1,0 +1,20 @@
+[package]
+name = "rudroid-engine-native-activity"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Minimal EngineProfile proof: ANativeActivity_onCreate without Unity"
+
+[lib]
+name = "engine_native_activity"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+
+[dev-dependencies]
+rudroid-host-core = { path = "../../../host" }
+rudroid-host-config = { path = "../../../common/host-config" }
+rudroid-test-support = { path = "../../../test-support" }

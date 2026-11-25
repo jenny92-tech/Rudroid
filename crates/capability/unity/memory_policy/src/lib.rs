@@ -7,7 +7,7 @@ mod policy;
 mod pressure;
 
 use rudroid_common::host_api::{HostApiV0, HOST_API_VERSION};
-use rudroid_common::il2cpp::Il2cpp;
+use rudroid_unity_common::il2cpp::Il2cpp;
 use rudroid_common::registry::RudroidModuleEvent;
 use rudroid_common::ModuleKind;
 use engine::Engine;

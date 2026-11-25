@@ -6,12 +6,16 @@
 use std::{fs, path::{Path, PathBuf}, process::Command};
 
 /// Fingerprinted with the kit; preparation refuses a different vendor patch.
-pub const WSI_PATCH_SHA256: &str = "0fb24696fa4c06c21aaf6d55d960f8fdf044a0a1eeee0895bd4636409d912397";
+pub const WSI_PATCH_SHA256: &str = "865b0c136cc5f0dd7d051c561c08cf41855eb4234ac1a5e3f05765379389081a";
 
 fn run(command: &mut Command) {
     let status = command.status().unwrap_or_else(|error| panic!("{command:?}: {error}"));
     assert!(status.success(), "{command:?}: {status}");
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/vulkan_wsi.rs"]
+mod tests;
 
 fn pkg_config(args: &[&str]) -> String {
     let output = Command::new("pkg-config").args(args).output().expect("existing pkg-config");
@@ -30,10 +34,15 @@ pub fn build(target: &Path, release: bool) {
     let out = target.join("native-objects/vulkan-wsi").join(if release { "release" } else { "debug" });
     fs::create_dir_all(&out).expect("WSI compiler output");
     let source = inputs.join("wsi-patched");
+    let abi_check = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vulkan_wsi_abi.c");
     run(Command::new("gcc").args(["-std=c11", "-Werror", "-fsyntax-only", "-D__user="])
         .arg("-I").arg(source.join("util/wsialloc"))
         .arg("-I").arg(inputs.join("uapi"))
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/vulkan_wsi_abi.c")));
+        .arg(&abi_check));
+    run(Command::new("g++").args(["-x", "c++", "-std=c++17", "-Werror", "-fsyntax-only", "-D__user="])
+        .arg("-I").arg(source.join("util/wsialloc"))
+        .arg("-I").arg(inputs.join("uapi"))
+        .arg(&abi_check));
     let flags = pkg_config(&["--cflags", "wayland-client"]);
     let libraries = pkg_config(&["--libs", "wayland-client"]);
     // The Wayland recipe uses DRM format constants only, no libdrm calls.
@@ -97,10 +106,14 @@ pub fn build(target: &Path, release: bool) {
     // Keep an optional non-capability DSO outside the descriptor scanner's directory.
     let profile = target.join(if release { "release" } else { "debug" }).join("vulkan-wsi");
     fs::create_dir_all(&profile).expect("WSI artifact directory");
-    for name in ["libVkLayer_window_system_integration.so", "VkLayer_window_system_integration.json"] {
-        let from = if name.ends_with(".json") { inputs.join("layer.json") } else { out.join(name) };
-        fs::copy(from, profile.join(name)).expect("WSI artifact");
+    let dso_src = out.join("libVkLayer_window_system_integration.so");
+    let dso_dst = profile.join("libVkLayer_window_system_integration.so");
+    if release {
+        run(Command::new("strip").args(["--strip-unneeded", "-o"]).arg(&dso_dst).arg(&dso_src));
+    } else {
+        fs::copy(&dso_src, &dso_dst).expect("WSI artifact");
     }
+    fs::copy(inputs.join("layer.json"), profile.join("VkLayer_window_system_integration.json")).expect("WSI layer manifest");
     fs::copy(inputs.join("receipt.json"), profile.join("sources.json")).expect("WSI provenance");
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for (source, destination) in [

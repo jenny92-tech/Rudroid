@@ -1,9 +1,9 @@
 //! INPUT:  upstream wsialloc v3 requests and the target's existing GBM driver
-//! OUTPUT:  exact-layout single-plane DMA-BUFs, with fd ownership transferred only on success
+//! OUTPUT:  exact-layout DMA-BUFs, owned success fds and evidence-based wsialloc v3 errors
 //! POS:    Rust native allocation boundary for optional Wayland Vulkan presentation
 #![cfg(target_os = "linux")]
 
-use std::{ffi::c_void, fs::{File, OpenOptions}, os::fd::{AsRawFd, IntoRawFd, OwnedFd, FromRawFd},
+use std::{ffi::c_void, fs::{File, OpenOptions}, io::Write, os::fd::{AsRawFd, IntoRawFd, OwnedFd, FromRawFd},
     sync::{Mutex, OnceLock}};
 
 #[derive(Clone, Copy, Default)]
@@ -35,6 +35,21 @@ impl Default for AllocateResult {
 }
 
 type Handle = *mut c_void;
+extern "C" { fn __errno_location() -> *mut i32; }
+
+// Linux ARM64 errno values, attested by native-build's wsialloc ABI gate.
+// An undocumented driver failure is not evidence of resource exhaustion.
+fn resource_errno(error: i32) -> bool { matches!(error, 11 | 12 | 23 | 24 | 28) }
+
+fn report_allocation_failure(stage: &str, error: i32, result: i32) {
+    let evidence = if result == -3 { "resource" }
+        else if stage.starts_with("gbm_") { "unclassified-driver; v3 fallback" }
+        else { "unsupported-layout" };
+    // Error-only and best effort: a failed log sink must not unwind across C.
+    let _ = writeln!(std::io::stderr().lock(),
+        "Rudroid WSI allocation failed: stage={stage} errno={error} wsialloc={result} evidence={evidence}");
+}
+
 struct Gbm {
     _library: libloading::Library,
     create_device: unsafe extern "C" fn(i32) -> Handle,
@@ -89,7 +104,7 @@ impl Drop for Buffer<'_> {
 }
 
 fn valid_geometry(info: &AllocateInfo) -> bool {
-    (1..=8192).contains(&info.width) && (1..=8192).contains(&info.height)
+    (1..=16384).contains(&info.width) && (1..=16384).contains(&info.height)
         && (1..=256).contains(&info.format_count) && info.flags == 0 && !info.formats.is_null()
 }
 fn supported_format(format: Format) -> bool {
@@ -132,7 +147,9 @@ pub unsafe extern "C" fn wsialloc_new(output: *mut *mut Allocator) -> i32 {
     // SAFETY: writable native output under the function contract.
     unsafe { *output = std::ptr::null_mut() };
     let Ok(gbm) = Gbm::load() else { return -3; };
-    let explicit = std::env::var("RUDROID_VULKAN_GBM_DEVICE").ok();
+    let explicit = std::env::var("RUDROID_VULKAN_GBM_DEVICE")
+        .ok()
+        .filter(|value| !value.is_empty());
     let drm = match open_drm_with(explicit.as_deref(), |path| OpenOptions::new().read(true).write(true).open(path)) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => return -1,
@@ -165,21 +182,38 @@ pub unsafe extern "C" fn wsialloc_delete(allocator: *mut Allocator) {
 pub unsafe extern "C" fn wsialloc_alloc(allocator: *mut Allocator, info: *const AllocateInfo,
     output: *mut AllocateResult) -> i32 {
     if allocator.is_null() || info.is_null() || output.is_null() { return -1; }
+    let mut failure = ("format", 0);
+    let mut resource_failure = None;
     // SAFETY: borrowed live owner/input and unique output follow the native ABI;
     // all native object guards below end before this owner borrow ends.
     unsafe {
         *output = AllocateResult::default();
         let owner = &*allocator;
         let info = &*info;
-        if !valid_geometry(info) { return -1; }
+        if !valid_geometry(info) {
+            report_allocation_failure("geometry", 0, -1);
+            return -1;
+        }
         let formats = std::slice::from_raw_parts(info.formats, info.format_count as usize);
         let mut layout = owner.gate.lock().unwrap_or_else(|p| p.into_inner());
+        let mut driver_failure: Option<(&str, i32)> = None;
         for &format in formats {
             if !supported_format(format) { continue; }
+            // GBM may leave errno untouched. Clear it before each fallible
+            // call, then capture it before a BO destructor or logging can alter it.
+            let error = __errno_location();
+            *error = 0;
             let handle = (owner.gbm.create)(owner.device as Handle, info.width, info.height,
                 format.fourcc, &format.modifier, 1);
-            if handle.is_null() { continue; }
+            if handle.is_null() {
+                let current = ("gbm_create", *error);
+                if driver_failure.is_none() { driver_failure = Some(current); }
+                failure = current;
+                if resource_errno(current.1) { resource_failure = Some(current); }
+                continue;
+            }
             let buffer = Buffer { owner, handle };
+            if driver_failure.is_none() { failure = ("layout", 0); }
             if (owner.gbm.modifier)(handle) != format.modifier || (owner.gbm.format)(handle) != format.fourcc
                 || (owner.gbm.planes)(handle) != 1 || (owner.gbm.offset)(handle, 0) != 0 { continue; }
             let stride = (owner.gbm.stride)(handle);
@@ -189,8 +223,15 @@ pub unsafe extern "C" fn wsialloc_alloc(allocator: *mut Allocator, info: *const 
             // The upstream swapchain reuses its first image's layout for all
             // images. Refuse a driver layout change before exporting any fd.
             if layout.is_some_and(|previous| previous != selected) { continue; }
+            *error = 0;
             let fd = (owner.gbm.fd)(handle);
-            if fd < 0 { continue; }
+            if fd < 0 {
+                let current = ("gbm_export", *error);
+                if driver_failure.is_none() { driver_failure = Some(current); }
+                failure = current;
+                if resource_errno(current.1) { resource_failure = Some(current); }
+                continue;
+            }
             let fd = OwnedFd::from_raw_fd(fd);
             // Complete every fallible operation before the single ownership transfer.
             drop(buffer);
@@ -199,8 +240,16 @@ pub unsafe extern "C" fn wsialloc_alloc(allocator: *mut Allocator, info: *const 
                 offsets: [0; 4], buffer_fds: [fd.into_raw_fd(), -1, -1, -1], is_disjoint: false };
             return 0;
         }
+        if let Some(first) = driver_failure {
+            failure = first;
+        }
     }
-    -2
+    // The v3 ABI has no generic driver-error code. Preserve its existing -2
+    // fallback for unknown failures, but do not present it as proven format
+    // rejection. A later candidate can still succeed after any earlier failure.
+    let (result, (stage, error)) = resource_failure.map_or((-2, failure), |failure| (-3, failure));
+    report_allocation_failure(stage, error, result);
+    result
 }
 
 #[cfg(test)]

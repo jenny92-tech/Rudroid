@@ -16,7 +16,8 @@ class TexturePolicyTest(unittest.TestCase):
 
     def test_font_data_and_effect_names_remain_protected(self):
         for name in ("NotoSans SDF Atlas", "Color_Grading_LUT", "Vignette White Mask",
-                     "jump_double_glow", "fog-gradient-left", "trackingSilhouetteMask"):
+                     "jump_double_glow", "fog-gradient-left", "trackingSilhouetteMask",
+                     "BitmapFontAtlas", "CustomFont"):
             with self.subTest(name=name):
                 self.assertIsNotNone(sensitive_name_reason(name))
         self.assertIsNone(sensitive_name_reason("Deepnest Background"))

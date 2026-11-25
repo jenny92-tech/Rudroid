@@ -1,5 +1,5 @@
 // INPUT:  Android ARM64 public stat/dirent/tm layouts and production POSIX provider
-// OUTPUT:  rudroid_posix_probe verifies native file ownership, time, constants and FP128 ABI
+// OUTPUT:  rudroid_posix_probe verifies LP64 large-file aliases, seeded rand, ownership, time and FP128 ABI
 // POS:    guest uses the same host file descriptor, directory buffer and clock service
 typedef unsigned long U64;
 typedef struct { long tv_sec, tv_nsec; } Time;
@@ -17,6 +17,11 @@ extern long lseek(int, long, int);
 extern long read(int, void *, U64);
 extern int close(int);
 extern int open(const char *, int, ...);
+extern int open64(const char *, int, ...),openat64(int,const char *,int,...);
+extern long pread64(int,void *,U64,long),pwrite64(int,const void *,U64,long);
+extern int ftruncate64(int,long),unlinkat(int,const char *,int);
+extern void srand(unsigned);
+extern int rand(void);
 extern void *opendir(const char *);
 extern void *fdopendir(int);
 extern Dirent *readdir(void *);
@@ -100,6 +105,29 @@ int rudroid_posix_probe(const char *directory, const char *path, int fd) {
     if (strcmp(prop.name,"ro.product.cpu.abi") || strcmp(prop.value,"arm64-v8a")) return 36;
     if (__system_property_get("swappy.disable",prop.value)!=1 || strcmp(prop.value,"1")) return 37;
     if (__system_property_find("unknown") || __system_property_get("unknown",prop.value) || prop.value[0] || prop.before!=71 || prop.after!=82) return 38;
+    int large=open64(path,2); // Android O_RDWR; no variadic mode argument.
+    if (large<0) return 39;
+    long offset=0x100000000L;
+    if (ftruncate64(large,offset+8) || pwrite64(large,"sparse64",8,offset)!=8 || lseek(large,0,1)!=0) return 40;
+    struct { char before,bytes[8],after; } wide_io={.before=71,.after=82};
+    if (pread64(large,wide_io.bytes,8,offset)!=8 || wide_io.before!=71 || wide_io.after!=82) return 41;
+    for (int i=0;i<8;++i) if (wide_io.bytes[i]!="sparse64"[i]) return 42;
+    if (fstat(large,&metadata.value) || metadata.value.st_size!=offset+8 || ftruncate64(large,9) || close(large)) return 43;
+    directory_fd=open64(directory,0);
+    if (directory_fd<0) return 44;
+    // Android O_CREAT|O_EXCL|O_RDWR and a real promoted mode_t argument.
+    int created=openat64(directory_fd,"created64",0xc2,0600u);
+    if (created<0 || fstat(created,&metadata.value) || (metadata.value.st_mode&0777)!=0600) return 45;
+    if (close(created) || unlinkat(directory_fd,"created64",0) || close(directory_fd)) return 46;
+    if (ftruncate64(-1,0)!=-1 || *__errno()!=9 || pread64(-1,buffer,1,0)!=-1 || *__errno()!=9 ||
+        pwrite64(-1,"x",1,0)!=-1 || *__errno()!=9) return 47;
+    const unsigned seeds[]={0,1,0xffffffffu};
+    for (unsigned seed=0;seed<3;++seed) {
+        int samples[4]; srand(seeds[seed]);
+        for (int i=0;i<4;++i) samples[i]=rand();
+        srand(seeds[seed]);
+        for (int i=0;i<4;++i) if (rand()!=samples[i]) return 48;
+    }
     if (close(fd)) return 21;
     struct { char before, value[2], after; } error = { .before = 71, .after = 82 };
     *__errno() = 73;

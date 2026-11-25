@@ -41,14 +41,13 @@ Capability `silksong_unity6`, kind `gamepatch`, package gate `com.game.silksong`
   The launcher remains active for its button callback and delayed transition.
   Roots are callback-local; unknown layouts/missing panels retain native startup,
   and cancellation/error adds no retries or gameplay polling.
-- TouchManager belongs to the required common il2cpp_patch adapter; this title
-  never installs a second hook. Destroy, post-prune UnusedAssets and census/method/
+- This title installs its TouchManager setter at Il2cppReady with unity-common’s verified managed-hook ABI and stops the adapter at UnityStopping. Destroy, post-prune UnusedAssets and census/method/
   audio traces remain registered-only; see [capability limits](../../../../docs/MIGRATION-MAP.md#剩余差异与未支持范围).
   Fixture success and short gameplay paths are separate acceptance evidence.
 
 ## Constraints
 - Both the Rust `plugin_init` and native init are unsafe: the same-kit Host API must keep callbacks and resolved native code mapped, deliver valid module events and provide a quiescent hook-installation window.
-- Hook resolution validates staticness, parameter/return kinds and byref flags through common `method_signature`; missing or mismatched metadata leaves the native entry intact.
+- Hook resolution validates staticness, parameter/return kinds and byref flags through unity-common `method_signature`; missing or mismatched metadata leaves the native entry intact.
 
 - `EnableParticles` uses native `bool` on both Rust and C fixture sides, not a same-sized integer.
 - Managed-method hooks and original slots use `C-unwind`; guest exceptions may cross Rust frames. Temporary thread state must restore on unwind as well as return.
@@ -62,7 +61,7 @@ Capability `silksong_unity6`, kind `gamepatch`, package gate `com.game.silksong`
 
 | Name | Path | Responsibility |
 |------|------|----------------|
-| Manifest | `Cargo.toml` | `cdylib` + `rlib` `silksong_unity6`; common, host-config, libc |
+| Manifest | `Cargo.toml` | `cdylib` + `rlib` `silksong_unity6`; common, unity-common, host-config, libc |
 | Patch | `src/lib.rs` | Descriptor and gate, features, `plan()`, hook bodies, `install`, init |
 | Java resource helper | `src/java.rs` | Title package path callback delegated to the shared Context |
 | Language persistence | `src/language.rs` | Checked enum-switch completion, managed language name and normal PlayerPrefs save |

@@ -16,14 +16,15 @@ fingerprint=()
 pass_through=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --features)
-            [ $# -ge 2 ] || { echo "build-kit.sh: --features needs a value" >&2; exit 2; }
-            fingerprint+=("$1" "$2")
+        --features|-F)
+            [ $# -ge 2 ] || { echo "build-kit.sh: $1 needs a value" >&2; exit 2; }
+            fingerprint+=("--features" "$2")
             pass_through+=("$1" "$2")
             shift 2
             ;;
-        --features=*)
-            fingerprint+=("$1")
+        --features=*|-F=*)
+            value="${1#*=}"
+            fingerprint+=("--features" "$value")
             pass_through+=("$1")
             shift
             ;;
@@ -31,6 +32,10 @@ while [ $# -gt 0 ]; do
             fingerprint+=("$1")
             pass_through+=("$1")
             shift
+            ;;
+        --)
+            pass_through+=("$@")
+            break
             ;;
         *)
             pass_through+=("$1")
@@ -40,11 +45,9 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${#fingerprint[@]}" -gt 0 ]; then
-    exported="${RUDROID_KIT_FEATURES:-${fingerprint[*]}}"
-    if [ "${RUDROID_KIT_FEATURES:-}" != "" ] && [ "${RUDROID_KIT_FEATURES}" != "${fingerprint[*]}" ]; then
-        exported="${RUDROID_KIT_FEATURES} ${fingerprint[*]}"
-    fi
-    export RUDROID_KIT_FEATURES="$exported"
+    export RUDROID_KIT_FEATURES="${fingerprint[*]}"
+else
+    export RUDROID_KIT_FEATURES=""
 fi
 
 exec cargo build "${pass_through[@]}"

@@ -1,10 +1,10 @@
 # C++ 行为参考规则
 
-Bogodroid 是独立的只读参考仓库；Rudroid 编译和测试只使用自己的 workspace、
+Bogodroid 是独立知识库，历史 C++ 参考从其 Git 记录查阅；Rudroid 编译和测试只使用自己的 workspace、
 配置样例与 JNI fixture。当前五标题已完成本机基础交付，见[验收](ACCEPTANCE.md)。
 
-1. 阅读 C++ 的 `projects/unityloader/`、`loader/`、`platform/`、`javastubs/`、
-   `libjnivm/` 和 `thunks/` 对照行为；新实现放在 Rudroid。修改参考树需要明确任务授权。
+1. 需要 C++ 对照时按明确历史提交读取原 `projects/unityloader/`、`loader/`、`platform/`、
+   `javastubs/`、`libjnivm/` 和 `thunks/`；这些目录已退出 Bogodroid 当前工作树。新实现放在 Rudroid。
 2. Host Config 保持已有 schema 与行为兼容，容忍未知键。Reply Catalog 仍为独立、
    同构建二进制，不能合并为 TOML。具体消费者与差异查[能力表](MIGRATION-MAP.md)。
 3. 转录 JNI 签名、engine Spec、ABI、接口名和固定回复时精确核对并测试。

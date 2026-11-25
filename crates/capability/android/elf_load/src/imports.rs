@@ -32,11 +32,21 @@ pub unsafe extern "C" fn rudroid_elf_visit_imports(
     let result = (|| -> Result<(), LoadError> {
         let bytes = std::fs::read(path).map_err(LoadError::Io)?;
         let view = ElfView::parse(&bytes)?;
-        let symbols = view
+        let mut symbols = view
             .rela_iter()?
             .map(|entry| entry.2)
             .filter(|index| *index != 0)
             .collect::<BTreeSet<_>>();
+        for (kind, table) in view.packed.iter().enumerate() {
+            let Some((address, size)) = table else { continue; };
+            let invalid = super::elf::ElfError::InvalidPackedRelocations;
+            let decoder = super::packed::Decoder::new(view.vaddr_slice(*address, *size)?, kind == 1)
+                .map_err(invalid)?;
+            for entry in decoder {
+                let symbol = (entry.map_err(invalid)?.info >> 32) as usize;
+                if symbol != 0 { symbols.insert(symbol); }
+            }
+        }
         for index in symbols {
             let (name, _, section) = view.dynsym(index)?;
             if section != 0 {

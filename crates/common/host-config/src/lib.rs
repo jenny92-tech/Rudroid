@@ -1,5 +1,5 @@
 //! INPUT:  existing Host Config TOML and optional measured SDL output dimensions
-//! OUTPUT:  HostConfig typed views, getters and validated presentation/display/memory/Unity startup policies
+//! OUTPUT:  HostConfig typed views, getters and validated presentation/display/memory policies
 //! POS:    resolves compatible configuration while keeping output and guest rendering separate
 //! Compatible Host Config TOML reader.
 //!
@@ -16,12 +16,11 @@
 //!
 //! This crate never rewrites the schema and never merges the Reply Catalog
 //! format in: Host Config and Reply Catalog stay separate artifacts.
+//! Unity startup and Mono opt-in views live in `rudroid-unity-common`.
 #![forbid(unsafe_code)]
 
-use std::path::Path;
 use rudroid_common::runtime_policy::{MemoryMode, MemoryPolicy};
-mod unity_startup;
-pub use unity_startup::{UnityRenderThread, UnityStartupPolicy, MAX_BOOT_CONFIG_BYTES};
+use std::path::Path;
 
 /// Parsed Host Config document.
 #[derive(Debug, Clone)]
@@ -38,7 +37,10 @@ pub enum PresentationBackend {
 
 /// Explicit startup selection. GLES remains the compatible default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphicsApi { Gles, Vulkan }
+pub enum GraphicsApi {
+    Gles,
+    Vulkan,
+}
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -155,6 +157,9 @@ pub struct Paths {
     pub android_cache: Option<String>,
     pub android_obb_dirs: Vec<String>,
     pub android_source_dirs: Vec<String>,
+    /// Explicit guest support libraries mapped before the normal module plan.
+    /// Each entry is a relative path below `game_files`.
+    pub guest_preload: Vec<String>,
 }
 
 /// `[package]` identity used by gamepatch package gates.
@@ -183,6 +188,15 @@ impl Default for Device {
     }
 }
 
+impl rudroid_common::config_reader::ConfigReader for HostConfig {
+    fn boolean(&self, key: &str, fallback: bool) -> bool { self.get_bool(key, fallback) }
+    fn integer(&self, key: &str, fallback: i64) -> i64 { self.get_i64(key, fallback) }
+    fn number(&self, key: &str, fallback: f64) -> f64 { self.get_f64(key, fallback) }
+    fn text(&self, key: &str, fallback: &str) -> String {
+        self.get_string(key, fallback).unwrap_or_else(|| fallback.to_owned())
+    }
+}
+
 impl HostConfig {
     pub fn graphics_api(&self) -> Result<GraphicsApi, &'static str> {
         match self.node("gpu.graphicsApi") {
@@ -193,9 +207,7 @@ impl HostConfig {
         }
     }
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let table = text
-            .parse::<toml::Table>()
-            .map_err(ConfigError::Parse)?;
+        let table = text.parse::<toml::Table>().map_err(ConfigError::Parse)?;
         Ok(HostConfig { table })
     }
 
@@ -210,33 +222,56 @@ impl HostConfig {
     }
 
     /// Physical output and guest render geometry; explicit malformed policies are rejected.
-    pub fn render_dimensions(&self) -> Result<rudroid_common::display_dimensions::RenderDimensions, &'static str> {
+    pub fn render_dimensions(
+        &self,
+    ) -> Result<rudroid_common::display_dimensions::RenderDimensions, &'static str> {
         let device = self.device();
         self.render_dimensions_for_output(device.display_width, device.display_height)
     }
 
     /// Resolve the original exact/percentage policy against the real drawable,
     /// which fullscreen SDL may grant at a different size from the request.
-    pub fn render_dimensions_for_output(&self, width: i64, height: i64) -> Result<rudroid_common::display_dimensions::RenderDimensions, &'static str> {
-        for key in ["gpu.renderWidth","gpu.renderHeight","gpu.renderScalePercent"] {
-            if self.node(key).is_some_and(|value|convert::to_i64(value).is_none()) {
+    pub fn render_dimensions_for_output(
+        &self,
+        width: i64,
+        height: i64,
+    ) -> Result<rudroid_common::display_dimensions::RenderDimensions, &'static str> {
+        for key in [
+            "gpu.renderWidth",
+            "gpu.renderHeight",
+            "gpu.renderScalePercent",
+        ] {
+            if self
+                .node(key)
+                .is_some_and(|value| convert::to_i64(value).is_none())
+            {
                 return Err("gpu render dimensions/percentage must be integers");
             }
         }
-        if self.node("gpu.renderScaleSharp").is_some_and(|value|convert::to_bool(value).is_none()) {
+        if self
+            .node("gpu.renderScaleSharp")
+            .is_some_and(|value| convert::to_bool(value).is_none())
+        {
             return Err("gpu.renderScaleSharp must be a boolean or integer");
         }
         // Preserve the GLES filter when switching APIs. Vulkan has its own
         // explicit linear-only policy; it never implements the GLES sharp pass.
         let sharp = if self.graphics_api()? == GraphicsApi::Vulkan {
             match self.node("gpu.vulkanRenderFilter") {
-                None => {},
-                Some(toml::Value::String(value)) if value == "linear" => {},
-                Some(_) => return Err("gpu.vulkanRenderFilter must be linear; Vulkan sharp scaling is unsupported"),
+                None => {}
+                Some(toml::Value::String(value)) if value == "linear" => {}
+                Some(_) => return Err(
+                    "gpu.vulkanRenderFilter must be linear; Vulkan sharp scaling is unsupported",
+                ),
             }
             false
-        } else { self.get_bool("gpu.renderScaleSharp", true) };
+        } else {
+            self.get_bool("gpu.renderScaleSharp", true)
+        };
         if self.presentation_backend()? == PresentationBackend::WaylandNative {
+            if self.graphics_api()? == GraphicsApi::Vulkan {
+                return Err("gpu.presentationBackend=wayland_native is only supported with GLES; Vulkan uses internal presentation");
+            }
             if self.get_i64("gpu.renderWidth", 0) <= 0 || self.get_i64("gpu.renderHeight", 0) <= 0 {
                 return Err("wayland_native requires explicit gpu.renderWidth/renderHeight; percentages alone cannot select a native buffer");
             }
@@ -245,17 +280,25 @@ impl HostConfig {
             }
         }
         rudroid_common::display_dimensions::RenderDimensions::resolve(
-            width, height,
-            self.get_i64("gpu.renderWidth", 0), self.get_i64("gpu.renderHeight", 0),
-            self.get_i64("gpu.renderScalePercent", 100), sharp)
+            width,
+            height,
+            self.get_i64("gpu.renderWidth", 0),
+            self.get_i64("gpu.renderHeight", 0),
+            self.get_i64("gpu.renderScalePercent", 100),
+            sharp,
+        )
     }
 
     /// Cold backend selection; never implicitly changes an existing filter or render size.
     pub fn presentation_backend(&self) -> Result<PresentationBackend, &'static str> {
         match self.node("gpu.presentationBackend") {
             None => Ok(PresentationBackend::Internal),
-            Some(toml::Value::String(value)) if value == "internal" => Ok(PresentationBackend::Internal),
-            Some(toml::Value::String(value)) if value == "wayland_native" => Ok(PresentationBackend::WaylandNative),
+            Some(toml::Value::String(value)) if value == "internal" => {
+                Ok(PresentationBackend::Internal)
+            }
+            Some(toml::Value::String(value)) if value == "wayland_native" => {
+                Ok(PresentationBackend::WaylandNative)
+            }
             Some(_) => Err("gpu.presentationBackend must be internal or wayland_native"),
         }
     }
@@ -269,8 +312,16 @@ impl HostConfig {
         };
         let mut policy = MemoryPolicy::for_mode(mode);
         for (key, value, maximum) in [
-            ("runtime.stream_buffer_bytes", &mut policy.stream_buffer_bytes, 1024 * 1024),
-            ("runtime.stream_buffer_budget_mib", &mut policy.stream_buffer_budget_mib, 1024),
+            (
+                "runtime.stream_buffer_bytes",
+                &mut policy.stream_buffer_bytes,
+                1024 * 1024,
+            ),
+            (
+                "runtime.stream_buffer_budget_mib",
+                &mut policy.stream_buffer_budget_mib,
+                1024,
+            ),
         ] {
             if let Some(node) = self.node(key) {
                 let Some(number) = node.as_integer().filter(|n| (0..=maximum).contains(n)) else {
@@ -284,33 +335,6 @@ impl HostConfig {
                 .ok_or("runtime.preload_audio must be a boolean or integer")?;
         }
         Ok(policy)
-    }
-
-    /// Optional, title-validated opt-in. Existing configs retain engine defaults.
-    pub fn unity_startup_policy(&self) -> Result<UnityStartupPolicy, &'static str> {
-        let memory = self.memory_policy()?;
-        let render_thread = match self.node("unity.render_thread_mode") {
-            None => UnityRenderThread::Engine,
-            Some(toml::Value::String(value)) => match value.as_str() {
-                "engine" => UnityRenderThread::Engine,
-                "single" => UnityRenderThread::Single,
-                "multi" => UnityRenderThread::Multi,
-                "memory_mode" => match memory.mode {
-                    MemoryMode::LowMemory => UnityRenderThread::Single,
-                    MemoryMode::Balanced => UnityRenderThread::Engine,
-                    MemoryMode::Performance => UnityRenderThread::Multi,
-                },
-                _ => return Err("unity.render_thread_mode must be engine, single, multi or memory_mode"),
-            },
-            Some(_) => return Err("unity.render_thread_mode must be a string"),
-        };
-        if render_thread == UnityRenderThread::Engine { return Ok(UnityStartupPolicy::default()); }
-        let args = match self.node("package.mainIntentBundle.unity") {
-            None => "",
-            Some(toml::Value::String(value)) => value,
-            Some(_) => return Err("selected Unity render-thread policy requires string player arguments"),
-        };
-        UnityStartupPolicy::new(render_thread, args)
     }
 
     /// Overwrite one leaf value behind a dotted key. Returns `false` when an
@@ -335,10 +359,7 @@ impl HostConfig {
                 _ => return false,
             }
         }
-        table.insert(
-            leaf.to_owned(),
-            toml::Value::String(value.to_owned()),
-        );
+        table.insert(leaf.to_owned(), toml::Value::String(value.to_owned()));
         true
     }
 
@@ -373,6 +394,7 @@ impl HostConfig {
             android_cache: string("android_cache"),
             android_obb_dirs: array("android_obb_dirs"),
             android_source_dirs: array("android_source_dirs"),
+            guest_preload: array("guest_preload"),
         }
     }
 
@@ -409,21 +431,32 @@ impl HostConfig {
         }
     }
 
-    /// `[plugins].enabled` allowlist. `None` means "no allowlist configured":
+    /// `[plugins].enabled` allowlist. `Ok(None)` means "no allowlist configured":
     /// the loader then loads every capability found in the deploy dir, which
     /// matches the reference behavior (`PLUGIN_ARCHITECTURE.md`, load order).
-    pub fn enabled_plugins(&self) -> Option<Vec<String>> {
-        self.table
-            .get("plugins")
-            .and_then(|v| v.as_table())
-            .and_then(|s| s.get("enabled"))
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(str::to_owned)
-                    .collect()
-            })
+    /// Malformed `[plugins]` tables, non-array `enabled` values, or non-string
+    /// elements fail closed instead of silently widening to load-all.
+    pub fn enabled_plugins(&self) -> Result<Option<Vec<String>>, String> {
+        let Some(section) = self.table.get("plugins") else {
+            return Ok(None);
+        };
+        let section = section
+            .as_table()
+            .ok_or_else(|| "plugins section must be a table".to_owned())?;
+        let Some(enabled) = section.get("enabled") else {
+            return Ok(None);
+        };
+        let array = enabled
+            .as_array()
+            .ok_or_else(|| "plugins.enabled must be an array of capability ids".to_owned())?;
+        let mut ids = Vec::with_capacity(array.len());
+        for (index, item) in array.iter().enumerate() {
+            let id = item
+                .as_str()
+                .ok_or_else(|| format!("plugins.enabled[{index}] must be a string"))?;
+            ids.push(id.to_owned());
+        }
+        Ok(Some(ids))
     }
 
     // ---- dotted-key getters (RudroidPluginApi config_* parity) ----
@@ -431,7 +464,7 @@ impl HostConfig {
     /// The reference `config_node` walk. An empty key misses, and a trailing
     /// dot ends the walk on the node before it (`"a.b."` reads `a.b`): the
     /// C++ lexer stops once nothing follows the last dot.
-    fn node(&self, dotted_key: &str) -> Option<&toml::Value> {
+    pub fn node(&self, dotted_key: &str) -> Option<&toml::Value> {
         if dotted_key.is_empty() {
             return None;
         }
@@ -499,6 +532,11 @@ impl HostConfig {
             .and_then(|v| v.as_array())
             .map(|a| a.len())
             .unwrap_or(0)
+    }
+
+    /// Serialize the parsed table back to canonical TOML for cross-DSO readers.
+    pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string(&self.table)
     }
 }
 

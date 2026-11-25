@@ -96,6 +96,9 @@ fn run_cli(kit: &Kit, extra_args: &[&str]) -> (std::process::ExitStatus, String,
         .arg("--config")
         .arg(&kit.config)
         .args(extra_args.iter())
+        // The probe uses ordinary diagnostic logs. Enable them even for the
+        // check-only assertion that verifies the probe never ran.
+        .env("RUDROID_DIAGNOSTICS", "1")
         .output()
         .expect("spawn rudroid-unity-loader");
     (
@@ -146,8 +149,8 @@ fn run_mode_installs_config_and_names_missing_gamedata() {
     // gamedata diagnostic behind the gate is covered by
     // profile_lifecycle_fixture::cli_run_fails_when_gamedata_is_missing.
     assert!(
-        stderr.contains("no Unity profile capability"),
-        "error must name the missing Unity profile gate: {stderr}"
+        stderr.contains("no engine profile capability"),
+        "error must name the missing engine profile gate: {stderr}"
     );
     assert!(
         stdout.contains("android_base"),
@@ -180,11 +183,12 @@ fn relative_game_root_and_deploy_dir_are_resolved_before_native_init() {
     let root = kit.dir.join("gamedata").canonicalize().unwrap();
     let output = Command::new(BIN).current_dir(&kit.dir)
         .args([".", "--config", "host.toml"])
+        .env("RUDROID_DIAGNOSTICS", "1")
         .env("RUDROID_EXPECT_GAME_CWD", &root).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success()); // This probe kit deliberately has no Unity profile.
     assert!(stderr.contains("game cwd/config root verified by native init"), "{stderr}");
-    assert!(stderr.contains("no Unity profile capability"), "{stderr}");
+    assert!(stderr.contains("no engine profile capability"), "{stderr}");
     std::fs::remove_dir_all(kit.dir).unwrap();
 }
 
@@ -231,7 +235,7 @@ fn rudroid_skip_guest_is_explicit_and_never_a_start() {
 
 #[test]
 fn run_mode_requires_the_profile_before_mapping_guest_modules() {
-    // Ticket 53 reference order (reference main.cpp: prepare_unity_runtime
+    // Ticket 53 reference order (reference main.cpp: prepare_engine_runtime
     // precedes every guest load): a kit without a Unity profile fails at
     // the prepare gate, BEFORE any guest module is mapped.
     let dir = scratch_dir("guest-map");
@@ -267,7 +271,7 @@ fn run_mode_requires_the_profile_before_mapping_guest_modules() {
     // ...and the kit cannot start: no Unity profile capability.
     assert!(!status.success(), "a kit without a profile cannot start");
     assert!(
-        stderr.contains("no Unity profile capability"),
+        stderr.contains("no engine profile capability"),
         "the not-startable reason must name the profile gate: {stderr}"
     );
     // Nothing was mapped and nothing started.

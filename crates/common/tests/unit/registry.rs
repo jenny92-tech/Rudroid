@@ -14,7 +14,6 @@ fn pods_are_pointer_sized_fields_only() {
 }
 
 #[test]
-fn profile_flags_match_reference() {
-    assert_eq!(RUDROID_UNITY_PROFILE_NONE, 0);
-    assert_eq!(RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG, 1);
+fn engine_process_exit_code_is_positive() {
+    assert_eq!(RUDROID_ENGINE_RUN_PROCESS_EXIT, 1);
 }

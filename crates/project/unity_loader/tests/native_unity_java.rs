@@ -3,6 +3,12 @@
 //! POS: isolated handheld acceptance; one profile per process, no game or saves opened
 use rudroid_common::jni_env::{Arg, JObject, JniEnv, Native};
 use rudroid_unity_loader::{host_api, phases::Phase, runtime};
+#[path = "fixtures/android_listener_contract.rs"]
+mod android_listener_contract;
+#[path = "fixtures/android_id_contract.rs"]
+mod android_id_contract;
+#[path = "../../../capability/unity/gamepatch/soul_knight/src/signature.rs"]
+mod soul_knight_signature;
 use std::{
     ffi::CStr,
     path::PathBuf,
@@ -49,7 +55,8 @@ fn statfs_contract(env: JniEnv) {
     let long=|name:&CStr|env.call_long(object,env.method(class,name,c"()J").unwrap(),&[]);
     let int=|name:&CStr|env.call_int(object,env.method(class,name,c"()I").unwrap(),&[]);
     let first=[long(c"getBlockSizeLong"),long(c"getBlockCountLong"),long(c"getFreeBlocksLong"),long(c"getAvailableBlocksLong")];
-    assert!(first[0]>0 && first[1]>0 && 0<=first[3] && first[3]<=first[2] && first[2]<=first[1]);
+    assert_eq!(first,[4096,8_388_608,8_388_608,8_388_608],
+        "StatFs must report the legacy C++ 32 GiB compatibility capacity");
     for (name,value) in [(c"getBlockSize",first[0]),(c"getBlockCount",first[1]),(c"getFreeBlocks",first[2]),(c"getAvailableBlocks",first[3])] {assert_eq!(int(name),value as i32);}
     for (name,value) in [(c"getTotalBytes",first[1]),(c"getFreeBytes",first[2]),(c"getAvailableBytes",first[3])] {assert_eq!(long(name),first[0].wrapping_mul(value));}
     let field=env.get_field_id(class,c"_rudroidStat",c"[J");
@@ -57,10 +64,10 @@ fn statfs_contract(env: JniEnv) {
     let missing=std::ffi::CString::new(format!("/rudroid-statfs-missing-{}",std::process::id())).unwrap();
     let missing=env.new_string_utf(&missing);
     for bad in [missing,std::ptr::null_mut()] {
-        env.call_void(object,restat,&[Arg::object(bad)]);assert!(env.exception_check());env.exception_clear();
-        assert_eq!(long(c"getAvailableBlocksLong"),first[3],"failed restat must preserve the complete prior snapshot");
-        assert!(!env.is_same_object(old_weak,std::ptr::null_mut()));
+        env.call_void(object,restat,&[Arg::object(bad)]);clean(env);
+        assert_eq!(long(c"getAvailableBlocksLong"),first[3],"legacy restat ignores missing and null paths");
     }
+    assert!(env.is_same_object(old_weak,std::ptr::null_mut()),"refresh must release the retired snapshot");
     env.delete_local_ref(missing);
     env.call_void(object,restat,&[Arg::object(path)]);clean(env);
     assert!(env.is_same_object(old_weak,std::ptr::null_mut()),"restat must release the retired snapshot");env.delete_weak_global_ref(old_weak);
@@ -72,7 +79,7 @@ fn statfs_contract(env: JniEnv) {
     let array=env.get_object_field(object,field);let final_weak=env.new_weak_global_ref(array);env.delete_local_ref(array);
     for local in [object,path,class]{env.delete_local_ref(local);}
     assert!(env.is_same_object(final_weak,std::ptr::null_mut()),"no process-global StatFs snapshot cache may retain the object");env.delete_weak_global_ref(final_weak);clean(env);
-    println!("StatFs path={requested} block_size={} blocks={} free={} available={}: native capacity, retry failure, wide values and snapshot ownership passed",first[0],first[1],first[2],first[3]);
+    println!("StatFs: legacy 32 GiB capacity, ignored paths, wide values and snapshot ownership passed");
 }
 
 fn input_device_identity_contract(env: JniEnv) {
@@ -111,6 +118,39 @@ fn input_device_identity_contract(env: JniEnv) {
 
 fn clean(env: JniEnv) {
     assert!(!env.exception_check(), "JNI call left an exception");
+}
+
+fn soul_knight_signature_contract(env: JniEnv) {
+    assert_eq!(soul_knight_signature::register(env), 0);
+    clean(env);
+    let class = env.find_class(c"com/chillyroomsdk/sdkbridge/util/NativeUtil");
+    let method = env.static_method(class, c"getSignatureSHA1Hash", c"()Ljava/lang/String;").unwrap();
+    let helper = env.find_class(c"com/unity3d/player/ReflectionHelper");
+    let lookup = env.static_method(helper, c"getMethodID",
+        c"(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Method;").unwrap();
+    let name = env.new_string_utf(c"getSignatureSHA1Hash");
+    let descriptor = env.new_string_utf(c"()Ljava/lang/String;");
+    let reflected = env.call_static_object(helper, lookup,
+        &[Arg::object(class), Arg::object(name), Arg::object(descriptor), Arg::bool(true)]);
+    clean(env);
+    assert!(!reflected.is_null(), "Unity must resolve the static signature getter through ReflectionHelper");
+    for local in [reflected, descriptor, name, helper] { env.delete_local_ref(local); }
+    let expected = "DD96D1D8A18AA4165136F002CD56ADAECFD7955F".encode_utf16().collect::<Vec<_>>();
+    let first = env.call_static_object(class, method, &[]);
+    clean(env);
+    assert!(!first.is_null());
+    assert_eq!(env.string_utf16(first).as_deref(), Some(expected.as_slice()));
+    let second = env.call_static_object(class, method, &[]);
+    clean(env);
+    assert_eq!(env.string_utf16(second).as_deref(), Some(expected.as_slice()));
+    assert!(!env.is_same_object(first, second), "each query returns a fresh VM-owned string");
+    let weak = env.new_weak_global_ref(first);
+    env.delete_local_ref(first);
+    assert!(env.is_same_object(weak, std::ptr::null_mut()), "no global signature-string cache may retain the result");
+    env.delete_weak_global_ref(weak);
+    for local in [second, class] { env.delete_local_ref(local); }
+    clean(env);
+    println!("NativeUtil signature: static String ABI, exact certificate SHA-1 UTF-16 and result ownership passed");
 }
 
 fn accessibility_delegate_contract(env: JniEnv, player: JObject) {
@@ -207,11 +247,55 @@ fn presentation_route_contract(env: JniEnv, activity: JObject) {
     println!("host presentation route: absent by default, explicit enable/disable, coherent identity and reused ownership passed");
 }
 
+fn obb_storage_contract(env: JniEnv, activity: JObject, root: &std::path::Path, fallback: bool) {
+    let class = env.get_object_class(activity);
+    let method = env.method(class, c"getObbDirs", c"()[Ljava/io/File;").unwrap();
+    let dirs = env.call_object(activity, method, &[]);
+    clean(env);
+    let array_class = env.find_class(c"[Ljava/io/File;");
+    assert!(!dirs.is_null() && env.is_instance_of(dirs, array_class));
+    let file_class = env.find_class(c"java/io/File");
+    let get_path = env.method(file_class, c"getPath", c"()Ljava/lang/String;").unwrap();
+    let expected: &[Option<&str>] = if fallback {
+        &[Some("external 数据")]
+    } else {
+        &[Some("obb 二"), None, Some("obb 一")]
+    };
+    assert_eq!(env.get_array_length(dirs), expected.len() as i32);
+    for (index, expected) in expected.iter().enumerate() {
+        let file = env.get_object_array_element(dirs, index as i32);
+        if let Some(expected) = expected {
+            assert!(!file.is_null() && env.is_instance_of(file, file_class));
+            let path = env.call_object(file, get_path, &[]);
+            clean(env);
+            assert_eq!(PathBuf::from(env.string(path).unwrap()), root.join(expected).canonicalize().unwrap());
+            env.delete_local_ref(path);
+            env.delete_local_ref(file);
+        } else {
+            assert!(file.is_null());
+        }
+    }
+    let primary_method = env.method(class, c"getObbDir", c"()Ljava/io/File;").unwrap();
+    let primary = env.call_object(activity, primary_method, &[]);
+    clean(env);
+    assert!(!primary.is_null() && env.is_instance_of(primary, file_class));
+    let primary_path = env.call_object(primary, get_path, &[]);
+    clean(env);
+    assert_eq!(PathBuf::from(env.string(primary_path).unwrap()), root.join(expected[0].unwrap()).canonicalize().unwrap());
+    for local in [primary_path, primary, file_class, array_class, dirs, class] {
+        env.delete_local_ref(local);
+    }
+    clean(env);
+}
+
 fn storage_contract(env: JniEnv, activity: JObject, root: &std::path::Path) {
     let class = env.get_object_class(activity);
     let file_class = env.find_class(c"java/io/File");
     let absolute = env.method(file_class, c"getAbsolutePath", c"()Ljava/lang/String;").unwrap();
     let get_path = env.method(file_class, c"getPath", c"()Ljava/lang/String;").unwrap();
+    let to_string = env.method(file_class, c"toString", c"()Ljava/lang/String;").unwrap();
+    let object_class = env.find_class(c"java/lang/Object");
+    let object_string = env.method(object_class, c"toString", c"()Ljava/lang/String;").unwrap();
     let parent = env.method(file_class, c"getParent", c"()Ljava/lang/String;").unwrap();
     let helper = env.find_class(c"com/unity3d/player/ReflectionHelper");
     let lookup = env.static_method(helper, c"getMethodID", c"(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/String;Z)Ljava/lang/reflect/Method;").unwrap();
@@ -238,6 +322,13 @@ fn storage_contract(env: JniEnv, activity: JObject, root: &std::path::Path) {
         assert_eq!(actual.canonicalize().unwrap(), expected, "{name:?} must honor the configured directory");
         let path_again = env.call_object(file, get_path, &[]);
         assert_eq!(env.string(path_again).unwrap().as_str(), text.as_str());
+        for method in [to_string, object_string] {
+            let displayed = env.call_object(file, method, &[]);
+            clean(env);
+            assert!(env.string_utf16(displayed) == env.string_utf16(path_again),
+                "File.toString and virtual Object.toString must preserve the configured owned-root pathname");
+            env.delete_local_ref(displayed);
+        }
         let parent_path = env.call_object(file, parent, &[]);
         assert_eq!(PathBuf::from(env.string(parent_path).unwrap().as_str()).canonicalize().unwrap(), root);
         // Unity reflection requests Object for these inherited File methods.
@@ -252,8 +343,52 @@ fn storage_contract(env: JniEnv, activity: JObject, root: &std::path::Path) {
         assert!(env.is_same_object(file_weak, std::ptr::null_mut()), "Context must not retain each returned File");
         assert!(env.is_same_object(path_weak, std::ptr::null_mut()), "a retired File must release its path String");
         for weak in [file_weak, path_weak] { env.delete_weak_global_ref(weak); }
-        println!("configured {name:?}: {}", actual.display());
+        println!("configured {name:?}: normalized owned-root File path/string identity passed");
     }
+    // Match Unity's static Object-shaped reflection request, then run the
+    // original Environment -> File -> StatFs chain with the legacy capacity view.
+    let environment=env.find_class(c"android/os/Environment");
+    let directory_method=env.static_method(environment,c"getDataDirectory",c"()Ljava/io/File;").unwrap();
+    let method_name=env.new_string_utf(c"getDataDirectory");
+    let reflected=env.call_static_object(helper,lookup,&[Arg::object(environment),Arg::object(method_name),Arg::object(object_result),Arg::bool(true)]);
+    clean(env);
+    assert!(!reflected.is_null(),"Unity must resolve static Environment.getDataDirectory with an Object-shaped result");
+    let volume=env.call_static_object(environment,directory_method,&[]);
+    clean(env);
+    assert!(!volume.is_null() && env.is_instance_of(volume,file_class));
+    let volume_path=env.call_object(volume,get_path,&[]);
+    assert_eq!(PathBuf::from(env.string(volume_path).unwrap().as_str()),root.join("data 数据").canonicalize().unwrap());
+    let stat_class=env.find_class(c"android/os/StatFs");
+    let stat=env.alloc_object(stat_class);
+    env.call_void(stat,env.method(stat_class,c"<init>",c"(Ljava/lang/String;)V").unwrap(),&[Arg::object(volume_path)]);
+    clean(env);
+    let blocks=env.call_long(stat,env.method(stat_class,c"getAvailableBlocksLong",c"()J").unwrap(),&[]);
+    let block_size=env.call_int(stat,env.method(stat_class,c"getBlockSize",c"()I").unwrap(),&[]);
+    let bytes=env.call_long(stat,env.method(stat_class,c"getAvailableBytes",c"()J").unwrap(),&[]);
+    assert!(blocks>=0 && block_size>0);
+    assert_eq!(blocks.wrapping_mul(i64::from(block_size)),bytes,"the game's MiB calculation must use a coherent StatFs view");
+    assert_eq!(bytes,32i64*1024*1024*1024,"the compatibility query must report 32768 MiB");
+    let volume_weak=env.new_weak_global_ref(volume);
+    let path_weak=env.new_weak_global_ref(volume_path);
+    for local in [stat,stat_class,volume_path,volume,reflected,method_name,environment] {env.delete_local_ref(local);}
+    for weak in [volume_weak,path_weak] {
+        assert!(env.is_same_object(weak,std::ptr::null_mut()),"the volume query must not retain File/path globals");
+        env.delete_weak_global_ref(weak);
+    }
+    // Synthetic VM-owned File data exercises String fidelity without creating
+    // a filesystem path or reading any game/profile contents.
+    let exact_units = [0x2f, 0x5143, 0x6c14, 0, 0xd800, 0xdc00, 0xdfff];
+    let synthetic = env.alloc_object(file_class);
+    let exact_path = env.new_string(&exact_units);
+    env.set_object_field(synthetic, env.get_field_id(file_class, c"path", c"Ljava/lang/String;"), exact_path);
+    for method in [get_path, to_string, object_string] {
+        let result = env.call_object(synthetic, method, &[]);
+        clean(env);
+        assert!(env.string_utf16(result).as_deref() == Some(exact_units.as_slice()),
+            "File path/string conversion must preserve every UTF-16 unit");
+        env.delete_local_ref(result);
+    }
+    for local in [synthetic, exact_path, object_class] { env.delete_local_ref(local); }
     let info = env.call_object(activity, env.method(class, c"getApplicationInfo", c"()Landroid/content/pm/ApplicationInfo;").unwrap(), &[]);
     let info_class = env.get_object_class(info);
     let data = env.get_object_field(info, env.get_field_id(info_class, c"dataDir", c"Ljava/lang/String;"));
@@ -292,6 +427,11 @@ fn configured_storage_paths_and_owners_survive_both_profile_bridges() {
         let fixture = root.join(profile);
         std::fs::create_dir(&fixture).unwrap();
         std::fs::create_dir(fixture.join("gamedata")).unwrap();
+        if profile == "unity_6" {
+            for name in ["obb 一", "obb 二"] {
+                std::fs::create_dir(fixture.join(name)).unwrap();
+            }
+        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["production_profiles_share_java_services_with_their_own_signatures", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
             .env("RUDROID_RESOURCE_KIT", &kit).env("RUDROID_UNITY_PROFILE", profile)
@@ -311,9 +451,12 @@ fn production_profiles_share_java_services_with_their_own_signatures() {
     assert!(matches!(profile.as_str(), "unity_6" | "unity_2021_3"));
     let legacy = profile == "unity_2021_3";
     let storage_root = std::env::var_os("RUDROID_STORAGE_PROBE_ROOT").map(PathBuf::from);
-    let config = storage_root.as_ref().map(|_| rudroid_host_config::HostConfig::parse(
-        "[paths]\nandroid_files='../files 数据/'\nandroid_external_files='../external 数据/'\nandroid_cache='../cache 数据/'\nandroid_data='../data 数据/'\n"
-    ).unwrap());
+    let config = storage_root.as_ref().map(|_| {
+        let obb = if legacy { "" } else { "android_obb_dirs=['../obb 二/', '', '../obb 一/']\n" };
+        rudroid_host_config::HostConfig::parse(&format!(
+            "[paths]\nandroid_files='../files 数据/'\nandroid_external_files='../external 数据/'\nandroid_cache='../cache 数据/'\nandroid_data='../data 数据/'\n{obb}[android]\nbuild.sdk='99'\n"
+        )).unwrap()
+    });
     host_api::install_config(config).unwrap();
     let host = host_api::table();
     let names = [
@@ -354,6 +497,7 @@ fn production_profiles_share_java_services_with_their_own_signatures() {
         env.delete_local_ref(class);
     }
     statfs_contract(env);
+    soul_knight_signature_contract(env);
     let build = env.find_class(c"android/os/Build");
     let manufacturer = env.get_static_object_field(build,
         env.get_static_field_id(build, c"MANUFACTURER", c"Ljava/lang/String;"));
@@ -361,6 +505,16 @@ fn production_profiles_share_java_services_with_their_own_signatures() {
         "the Android device identity must not select a desktop Linux input profile");
     env.delete_local_ref(manufacturer);
     env.delete_local_ref(build);
+    let build_version = env.find_class(c"android/os/Build$VERSION");
+    let sdk = env.get_static_object_field(build_version,
+        env.get_static_field_id(build_version, c"SDK", c"Ljava/lang/String;"));
+    assert!(!sdk.is_null(), "Build.VERSION.SDK must be a readable String field");
+    assert_eq!(env.string_utf(sdk).unwrap().as_c_str(), c"26");
+    assert_eq!(env.get_static_int_field(build_version,
+        env.get_static_field_id(build_version, c"SDK_INT", c"I")), 26,
+        "SDK and SDK_INT must describe the same Android API level");
+    env.delete_local_ref(sdk);
+    env.delete_local_ref(build_version);
     clean(env);
     input_device_identity_contract(env);
     let system=env.find_class(c"java/lang/System");
@@ -383,7 +537,13 @@ fn production_profiles_share_java_services_with_their_own_signatures() {
         env.get_static_field_id(player_class, c"currentActivity", c"Landroid/app/Activity;"),
     );
     assert!(!activity.is_null());
-    if let Some(root) = storage_root { storage_contract(env, activity, &root); }
+    if let Some(root) = storage_root {
+        storage_contract(env, activity, &root);
+        obb_storage_contract(env, activity, &root, legacy);
+        android_id_contract::check(env, activity, &root);
+        assert_eq!(host.java_vm().unwrap().get_env(0x10006).unwrap().as_raw(), env.as_raw(),
+            "the Android ID source must retain the caller's attached thread");
+    }
     let activity_type=env.find_class(c"com/unity3d/player/UnityPlayerActivity");
     assert!(env.is_instance_of(activity,activity_type));
     let owned_player=env.get_object_field(activity,env.get_field_id(activity_type,c"mUnityPlayer",c"Lcom/unity3d/player/UnityPlayer;"));
@@ -671,5 +831,6 @@ fn production_profiles_share_java_services_with_their_own_signatures() {
         2,
         "disabled proxies must not call stale native handles"
     );
+    android_listener_contract::check(env, player);
     println!("{profile}: Activity, reflection, PAD and both native proxy routes passed");
 }

@@ -1,9 +1,7 @@
-//! `.init_array` parse-time validation (reference `so_initialize` scope:
-//! DT_INIT_ARRAY/DT_INIT_ARRAYSZ; DT_INIT is deliberately not part of the
-//! semantics). Malformed tables must fail with a diagnostic at load, on both
-//! backends — these run through the buffer backend so they execute on any
-//! host; the exec backend additionally RUNS the constructors (see
-//! `init_array_exec.rs`, Linux only).
+//! `.init_array` and DT_INIT parse-time validation. Malformed entries must
+//! fail with a diagnostic at load, on both backends — these run through the
+//! buffer backend so they execute on any host; the exec backend additionally
+//! RUNS the initializers (see `init_exec.rs`, Linux only).
 
 use std::collections::HashMap;
 
@@ -54,4 +52,28 @@ fn init_array_without_size_is_rejected() {
         .err()
         .expect("half init-array pair must not load");
     assert!(err.to_string().contains("without DT_INIT_ARRAYSZ"), "{err}");
+}
+
+#[test]
+fn dt_init_outside_the_image_is_rejected() {
+    let mut bytes = build_minimal_aarch64_so();
+    set_dynamic(&mut bytes, 7, 12, 0x00F0_0000_0000); // DT_INIT, past the image
+    set_dynamic(&mut bytes, 8, 0, 0);
+    let err = GuestModule::from_bytes(bytes, &HashMap::new())
+        .err()
+        .expect("DT_INIT past the image must not load");
+    assert!(err.to_string().contains("DT_INIT is invalid"), "{err}");
+    assert!(err.to_string().contains("executable PT_LOAD"), "{err}");
+}
+
+#[test]
+fn dt_init_must_point_into_an_executable_segment() {
+    let mut bytes = build_minimal_aarch64_so();
+    set_dynamic(&mut bytes, 7, 12, 576); // inside the file, but the fixture LOAD is not executable
+    set_dynamic(&mut bytes, 8, 0, 0);
+    let err = GuestModule::from_bytes(bytes, &HashMap::new())
+        .err()
+        .expect("DT_INIT in a non-executable segment must not load");
+    assert!(err.to_string().contains("DT_INIT is invalid"), "{err}");
+    assert!(err.to_string().contains("executable PT_LOAD"), "{err}");
 }

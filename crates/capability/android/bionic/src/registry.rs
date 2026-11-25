@@ -1,5 +1,5 @@
 //! INPUT:  every android_bionic Rust/C symbol source and the Android libc.map version nodes
-//! OUTPUT:  liblog/libm/libc provider lists, version requirements and enumerable names
+//! OUTPUT:  liblog/libm/libc/libstdc++ provider lists, version requirements and enumerable names
 //! POS:    the single place deciding which provider answers an Android name; duplicates are test failures
 //!
 //! Every provider is a table whose lookup and name list come from the same
@@ -87,6 +87,7 @@ c_provider!(NETWORK_C, "network.c", rudroid_bionic_network_symbol, rudroid_bioni
 c_provider!(ATFORK_C, "atfork.c", rudroid_bionic_atfork_symbol, rudroid_bionic_atfork_symbol_name);
 c_provider!(POSIX_C, "posix.c", rudroid_bionic_posix_symbol, rudroid_bionic_posix_symbol_name);
 c_provider!(STDIO_FORMAT_C, "stdio_variadic.c", rudroid_bionic_stdio_format_symbol, rudroid_bionic_stdio_format_symbol_name);
+c_provider!(LIBSTDCXX_C, "libstdcxx.c", rudroid_bionic_libstdcxx_symbol, rudroid_bionic_libstdcxx_symbol_name);
 
 /// Allocation family and C++ destructor registration.
 mod alloc {
@@ -124,6 +125,22 @@ pub(crate) static LIBC: [Provider; 15] = [
     ALLOC, BASIC, SYNC, THREADS, DIAGNOSTICS, MULTIBYTE, IDENTITY, LOCALE_C, JUMP_C, SIGNALS_C,
     NETWORK_C, ATFORK_C, POSIX_C, STDIO, STDIO_FORMAT_C,
 ];
+
+/// Legacy C++ runtime imports are answered only for this exact SONAME and
+/// version node, independently of the libc provider list.
+pub(crate) const LIBSTDCXX_VERSION: &CStr = c"LIBC_O";
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const LIBSTDCXX_VERSIONED: &[(&[u8], &CStr)] = &[
+    (b"_Znwm", LIBSTDCXX_VERSION),
+    (b"_Znam", LIBSTDCXX_VERSION),
+    (b"_ZdlPv", LIBSTDCXX_VERSION),
+    (b"_ZdaPv", LIBSTDCXX_VERSION),
+    (b"__cxa_guard_acquire", LIBSTDCXX_VERSION),
+    (b"__cxa_guard_release", LIBSTDCXX_VERSION),
+    (b"__cxa_guard_abort", LIBSTDCXX_VERSION),
+    (b"__cxa_pure_virtual", LIBSTDCXX_VERSION),
+];
+pub(crate) static LIBSTDCXX: Provider = LIBSTDCXX_C;
 
 /// Android `libc.map.txt` nodes for the supported names outside base `LIBC`.
 pub(crate) const VERSIONED: &[(&[u8], &CStr)] = &[

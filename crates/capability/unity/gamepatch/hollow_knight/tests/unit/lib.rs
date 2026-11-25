@@ -8,7 +8,7 @@ fn ortho_cache_keeps_repeated_values_stable_and_refuses_invalid_or_excess_entrie
     *lock(&ORTHO_SLOTS) = [(0, 0.0, 0.0); 16];
     let scale = 4.0 / 3.0;
     for id in 1..=16 {
-        let patched = remember_ortho(id, 2.0, scale).unwrap();
+        let patched = cache_ortho(id, 2.0, scale, false).unwrap();
         assert_eq!(patched, 2.0 * scale);
         for _ in 0..32 { assert_eq!(remember_ortho(id, patched, scale), Some(patched)); }
     }
@@ -25,13 +25,13 @@ fn ortho_cache_keeps_repeated_values_stable_and_refuses_invalid_or_excess_entrie
 fn capped_log_does_not_format_suppressed_messages() {
     let calls = std::cell::Cell::new(0);
     for _ in 0..4 {
-        bounded_log("test_lazy_log", 1, || {
+        bounded_log(log_counter!(), 1, || {
             calls.set(calls.get() + 1);
             String::new()
         });
     }
     assert_eq!(calls.get(), 1);
-    bounded_log("test_disabled_log", 0, || panic!("disabled log formatted"));
+    bounded_log(log_counter!(), 0, || panic!("disabled log formatted"));
 }
 
 fn config(body: &str) -> HostConfig {

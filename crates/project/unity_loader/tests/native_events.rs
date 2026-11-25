@@ -34,9 +34,9 @@ fn native_events_guest() {
     fs::write(root.join("bad.c"),"extern void *ALooper_forThread(void); extern void events_not_supported(void); void probe(void) { if (ALooper_forThread()) events_not_supported(); }\n").unwrap();
     compile("bad.c","bad.so");
     let capabilities=unsafe { load_deploy_dir(&kit,&Selection::All) }.unwrap();
-    let plan=guest::GuestPlan { game_files:root.clone(), entries:vec![guest::GuestEntry {
-        kind:Some(ModuleKind::Main),relative_path:"guest.so",required:true,gates:&[],
-    }] };
+    let plan=guest::GuestPlan { reserved_paths: vec![], defer_jni_on_load: vec![], game_files:root.clone(), entries:vec![guest::GuestEntry {
+        kind:Some(ModuleKind::Main),relative_path:"guest.so",required:true,gates: vec![],
+    }], preload:Vec::new() };
     let mut bad=plan.clone(); bad.entries[0].relative_path="bad.so";
     let error=unsafe { guest::bring_up(&capabilities,&bad) }.unwrap_err().to_string();
     assert!(error.contains("events_not_supported"),"{error}");

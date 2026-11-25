@@ -31,13 +31,6 @@ fn main() {
     if env::var("PROFILE").as_deref() == Ok("release") {
         println!("cargo:rustc-cfg=rudroid_release_profile");
     }
-    rudroid_native_build::build(&rudroid_native_build::NativeSources {
-        archive: Some("rudroid_managed_gateway"),
-        sources: &["src/managed_gateway.S"],
-        headers: &[],
-        extra_flags: &[],
-        link: &[],
-    });
     println!("cargo:rerun-if-env-changed=RUDROID_RUNTIME_BUILD_ID");
     println!("cargo:rerun-if-env-changed=RUDROID_KIT_FEATURES");
     println!("cargo:rerun-if-env-changed=CARGO_PROFILE_RELEASE_LTO");

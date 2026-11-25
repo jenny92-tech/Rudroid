@@ -1,3 +1,6 @@
+//! INPUT: cross-capability callbacks, handles and service descriptions
+//! OUTPUT: shared registration and query ABI types
+//! POS: runtime service ABI used by the loader and its members
 //! Registration PODs crossing the kit C ABI (ticket 45).
 //!
 //! Mirrors the read-only reference (`plugin_api.h`, `audio_policy.h`): the
@@ -13,7 +16,7 @@
 //!   stays pinned by the loader, so the host may keep the copied struct
 //!   forever. Every type here is ABI-identical to the C reference: `HostStr`
 //!   and `Option<&T>` are nullable pointers, callbacks are plain fn pointers.
-//! - `RudroidUnityProfile`, `RudroidAndroidHooks` and `RudroidAudioPolicy` are copied
+//! - `RudroidEngineProfile`, `RudroidAndroidHooks` and `RudroidAudioPolicy` are copied
 //!   by the host during registration (reference parity: "copied by the host
 //!   during init"). The first registration wins; duplicates are rejected
 //!   with a non-zero return.
@@ -88,39 +91,100 @@ pub struct RudroidModuleEvent {
 pub type RudroidModuleLoadedCallback =
     extern "C" fn(event: Option<&RudroidModuleEvent>, user: *mut c_void);
 
-/// Unity profile phases. `session` is the profile's opaque value from
+/// Loads one relative guest library below the active `game_files` root and
+/// calls that image's `JNI_OnLoad` with the shared VM. The loader owns the
+/// mapping/handle for process life. Zero reports success and writes the image
+/// base when `out_base` is non-null; any non-zero value is a hard failure.
+///
+/// # Safety
+/// `user` is the loader's opaque bring-up value from
+/// [`RudroidAfterMainJniContext`]. `relative` is a valid borrowed string for
+/// this call only. `out_base`, when non-null, is writable for one `usize`.
+pub type RudroidGuestLoadAndJniOnLoadFn = unsafe extern "C" fn(
+    user: *mut c_void,
+    relative: HostStr<'_>,
+    out_base: *mut usize,
+) -> c_int;
+
+/// The Main image has completed `JNI_OnLoad`; the next il2cpp load has not
+/// started. Capabilities may use the loader-owned operation to reproduce an
+/// explicit Java `System.loadLibrary` sequence. Return zero to continue and
+/// non-zero to stop bring-up before il2cpp is mapped.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct RudroidAfterMainJniContext {
+    pub main: RudroidModuleEvent,
+    pub loader_user: *mut c_void,
+    pub load_and_jni_on_load: Option<RudroidGuestLoadAndJniOnLoadFn>,
+}
+
+/// Optional post-Main-JNI hook. The host never dereferences `user`; callbacks
+/// run in registration order and a non-zero result aborts bring-up.
+pub type RudroidAfterMainJniCallback =
+    extern "C" fn(context: Option<&RudroidAfterMainJniContext>, user: *mut c_void) -> c_int;
+
+/// Engine profile phases. `session` is the profile's opaque value from
 /// `prepare`; the host only passes it back.
-pub type RudroidUnityPrepareCallback =
+pub type RudroidEnginePrepareCallback =
     extern "C" fn(api: Option<&'static HostApiV0>) -> *mut c_void;
-pub type RudroidUnityBootstrapCallback =
+pub type RudroidEngineValidateConfigCallback =
+    extern "C" fn(api: Option<&'static HostApiV0>) -> c_int;
+pub type RudroidEngineBootstrapCallback =
     extern "C" fn(session: *mut c_void, native_library_dir: HostStr<'_>) -> c_int;
-pub type RudroidUnityRunCallback = extern "C" fn(session: *mut c_void) -> c_int;
+pub type RudroidEngineRunCallback = extern "C" fn(session: *mut c_void) -> c_int;
+
+/// Builder callbacks append guest-plan entries owned by the loader. `role_id`
+/// is [`crate::ModuleKind`] as `u32` (`0` = no event). `after_role_id` is a
+/// KindLoaded gate (`0` = none). `flags`:
+/// [`RUDROID_GUEST_ENTRY_FMOD_JNI_OK`] and [`RUDROID_GUEST_ENTRY_AFTER_FMOD`].
+#[repr(C)]
+pub struct RudroidGuestPlanBuilder {
+    pub ctx: *mut c_void,
+    pub add_entry: Option<
+        extern "C" fn(
+            ctx: *mut c_void,
+            relative_path: HostStr<'_>,
+            role_id: u32,
+            required: c_int,
+            after_role_id: u32,
+            flags: u32,
+        ) -> c_int,
+    >,
+    pub add_reserved_path:
+        Option<extern "C" fn(ctx: *mut c_void, canonical_path: HostStr<'_>) -> c_int>,
+    pub set_defer_jni_on_load: Option<extern "C" fn(ctx: *mut c_void, role_id: u32) -> c_int>,
+}
+
+/// Fill the loader-owned guest plan. Prefer `api` for config/service queries;
+/// session is not required (may be called before prepare).
+pub type RudroidEngineBuildGuestPlanCallback = extern "C" fn(
+    api: Option<&'static HostApiV0>,
+    builder: Option<&RudroidGuestPlanBuilder>,
+) -> c_int;
 
 /// The engine requested stop and preferences were synchronously saved. The
 /// caller must end this process immediately, without native/service teardown:
 /// their state and code remain pinned until the kernel reclaims the process.
 /// Zero still means full teardown completed; negative values are failures.
-pub const RUDROID_UNITY_RUN_PROCESS_EXIT: c_int = 1;
+pub const RUDROID_ENGINE_RUN_PROCESS_EXIT: c_int = 1;
 
-/// Reference `RudroidUnityProfileFlags`.
-pub const RUDROID_UNITY_PROFILE_NONE: u32 = 0;
-pub const RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG: u32 = 1 << 0;
-
-/// Unity engine profile (reference `RudroidUnityProfile`). The host copies the
-/// struct; the profile lifecycle body itself is ticket 53's work.
+/// Engine profile registered through the Host API. The host copies the struct.
+/// Player class / initJni shape live on the engine Spec (player_lifecycle).
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct RudroidUnityProfile {
+pub struct RudroidEngineProfile {
     pub id: HostStr<'static>,
-    pub player_class: HostStr<'static>,
-    pub player_constructor_signature: HostStr<'static>,
-    pub init_jni_signature: HostStr<'static>,
-    pub flags: u32,
-    pub init_jni_int_arg: i32,
-    pub prepare: Option<RudroidUnityPrepareCallback>,
-    pub bootstrap: Option<RudroidUnityBootstrapCallback>,
-    pub run: Option<RudroidUnityRunCallback>,
+    pub validate_config: Option<RudroidEngineValidateConfigCallback>,
+    pub build_guest_plan: Option<RudroidEngineBuildGuestPlanCallback>,
+    pub prepare: Option<RudroidEnginePrepareCallback>,
+    pub bootstrap: Option<RudroidEngineBootstrapCallback>,
+    pub run: Option<RudroidEngineRunCallback>,
 }
+
+/// Guest-plan entry flags for [`RudroidGuestPlanBuilder::add_entry`].
+pub const RUDROID_GUEST_ENTRY_FMOD_JNI_OK: u32 = 1 << 0;
+/// Also require `KindLoaded(Fmod)` (FmodStudio pattern with `after_role_id = Unity`).
+pub const RUDROID_GUEST_ENTRY_AFTER_FMOD: u32 = 1 << 1;
 
 /// Android runtime hooks (reference `RudroidAndroidHooks`).
 #[derive(Clone, Copy)]

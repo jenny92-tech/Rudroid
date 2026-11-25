@@ -27,8 +27,8 @@ fn binary_disable_removes_advertisement_and_both_format_queries() {
         .unwrap();
     assert_eq!(result.joined.as_c_str(), c"GL_EXT_keep");
     assert_eq!(result.words.len(), 1);
-    assert_eq!(p.integer(0x87fe), Some(0));
-    assert_eq!(p.integer(0x87ff), Some(0));
+    assert_eq!(p.integer(0x87fe), Some(IntegerOverride::Scalar(0)));
+    assert_eq!(p.integer(0x87ff), Some(IntegerOverride::NoWrite));
     assert_eq!(policy().integer(0x87fe), None);
 }
 #[test]
@@ -48,8 +48,8 @@ fn extension_replace_remove_append_preserve_order_and_index_identity() {
 fn scalar_limits_do_not_shadow_vector_state_queries() {
     let mut p = policy();
     p.limits = vec![(0x0d33, 1024), (0x8d57, 0)];
-    assert_eq!(p.integer(0x0d33), Some(1024));
-    assert_eq!(p.integer(0x8d57), Some(0));
+    assert_eq!(p.integer(0x0d33), Some(IntegerOverride::Scalar(1024)));
+    assert_eq!(p.integer(0x8d57), Some(IntegerOverride::Scalar(0)));
     assert_eq!(p.integer(0x0ba2), None);
     assert_eq!(p.integer(0x87ff), None);
 }

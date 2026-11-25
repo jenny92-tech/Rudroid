@@ -25,6 +25,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use rudroid_unity_loader::{bring_up, guest, load_deploy_dir, runtime, Selection};
 
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
 /// JNI_VERSION_1_6: what a fully successful probe run returns.
 const JNI_VERSION_1_6: i32 = 0x0001_0006;
 
@@ -90,13 +93,29 @@ fn guest_plan(game_files: &Path) -> guest::GuestPlan {
         game_files.display()
     ))
     .unwrap();
-    guest::GuestPlan::from_config(&config).expect("plan")
+    let mut plan = guest::GuestPlan::from_config(&config).expect("plan");
+    if plan.entries.is_empty() {
+        unity_guest_plan::push_unity_arm64_entries(&mut plan);
+    }
+    plan
+}
+
+fn install_probe_config() {
+    // Both serialized cases install the same immutable config before phases.
+    // The native probe must distinguish a real configured launcher value from
+    // a present-null override and mutations of detached Bundle snapshots.
+    rudroid_unity_loader::host_api::install_config(Some(
+        rudroid_host_config::HostConfig::parse(
+            "[package]\nminSdkVersion = 24\ntargetSdkVersion = 35\nmainIntentBundle = { rudroid_probe_config = 'configured' }\n",
+        ).unwrap(),
+    )).unwrap();
 }
 
 #[test]
 fn jni_session_minimal_dynamic_loop() {
     let probe = jni_probe();
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    install_probe_config();
     let log = captured_log();
     // Fresh registry: whatever a previous test in this binary registered
     // must not stand in for this kit's own bring-up.
@@ -189,6 +208,7 @@ fn jni_session_minimal_dynamic_loop() {
 fn jni_onload_without_a_session_fails_guest_bring_up() {
     let probe = jni_probe();
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    install_probe_config();
     // Drop every registration — above all the shared-VM slot another test
     // may have filled — so this kit really runs without a session.
     runtime::shutdown();

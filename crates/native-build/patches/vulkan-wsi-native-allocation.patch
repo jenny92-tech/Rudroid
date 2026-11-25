@@ -1,39 +1,132 @@
---- a/wsi/wayland/swapchain.cpp
-+++ b/wsi/wayland/swapchain.cpp
-@@ -411,7 +411,13 @@
+--- a/layer/layer.cpp
++++ b/layer/layer.cpp
+@@ -37,6 +37,7 @@
+ #include "util/extension_list.hpp"
+ #include "util/custom_allocator.hpp"
+ #include "wsi/wsi_factory.hpp"
++#include "wsi/wayland/surface_carrier.hpp"
+ #include "util/log.hpp"
+ #include "util/macros.hpp"
+ #include "util/helpers.hpp"
+@@ -137,6 +138,7 @@
+    util::allocator allocator{ VK_SYSTEM_ALLOCATION_SCOPE_COMMAND, pAllocator };
+    util::vector<const char *> modified_enabled_extensions{ allocator };
+    util::extension_list extensions{ allocator };
++   bool headless_surface_carrier = false;
  
-    assert(image.data != nullptr);
-    auto image_data = static_cast<wayland_image_data *>(image.data);
--   TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
-+   // The first native GBM allocation also supplies the image's exact modifier
-+   // layout. Reuse it here; do not reserve or leak a second buffer for a query.
-+   if (!image_data->memory_allocated)
-+   {
-+      TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
-+      image_data->memory_allocated = true;
-+   }
-    image_status_lock.unlock();
- 
-    TRY_LOG(create_wl_buffer(image_create_info, image, image_data), "Failed to create wl_buffer");
-@@ -461,7 +467,8 @@
+    /* Find all the platforms that the layer can handle based on pCreateInfo->ppEnabledExtensionNames. */
+    auto layer_platforms_to_enable = wsi::find_enabled_layer_platforms(pCreateInfo);
+@@ -151,6 +153,8 @@
        }
  
-       wsialloc_format allocated_format = { 0 };
--      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, true));
-+      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, false));
-+      image_data->memory_allocated = true;
+       TRY_LOG_CALL(wsi::add_instance_extensions_required_by_layer(layer_platforms_to_enable, extensions));
++      TRY_LOG_CALL(wsi::wayland::enable_headless_surface_carrier(
++         extensions, wsi::wayland::headless_surface_carrier_requested(), headless_surface_carrier));
+       TRY_LOG_CALL(extensions.get_extension_strings(modified_enabled_extensions));
  
-       for (auto &prop : drm_format_props)
+       modified_info.ppEnabledExtensionNames = modified_enabled_extensions.data();
+@@ -190,6 +194,7 @@
+ 
+    TRY_LOG_CALL(instance_private_data::associate(*pInstance, std::move(*table), loader_callback,
+                                                  layer_platforms_to_enable, api_version, instance_allocator));
++   instance_private_data::get(*pInstance).headless_surface_carrier = headless_surface_carrier;
+ 
+    /*
+     * Store the enabled instance extensions in order to return nullptr in
+--- a/layer/private_data.hpp
++++ b/layer/private_data.hpp
+@@ -99,7 +99,8 @@
+    std::optional<FunctionType> get_fn(const char *fn_name) const
+    {
+       auto fn = m_entrypoints->find(fn_name);
+-      if (fn != m_entrypoints->end())
++      // Optional driver entrypoints may be registered with a null address.
++      if (fn != m_entrypoints->end() && fn->second.fn != nullptr)
        {
---- a/wsi/wayland/swapchain.hpp
-+++ b/wsi/wayland/swapchain.hpp
-@@ -57,6 +57,7 @@
+          return reinterpret_cast<FunctionType>(fn->second.fn);
+       }
+@@ -636,6 +637,8 @@
  
-    external_memory external_mem;
-    wl_buffer *buffer;
-+   bool memory_allocated{ false };
-    sync_fd_fence_sync present_fence;
- };
+    const instance_dispatch_table disp;
+    const uint32_t api_version;
++   /* Instance-scoped opt-in; enabling the extension alone never selects the carrier. */
++   bool headless_surface_carrier = false;
+ 
+ private:
+    /* Allow util::allocator to access the private constructor */
+--- a/util/log.cpp
++++ b/util/log.cpp
+@@ -34,27 +34,37 @@
+ namespace util
+ {
+ 
+-#ifndef NDEBUG
+ 
+ /**
+  * @brief check if a log level is enabled, and print it
+  */
+-static bool check_and_print_log_level(int level)
++bool wsi_log_enabled(int level)
+ {
+    struct log_state
+    {
+       int level = WSI_DEFAULT_LOG_LEVEL;
+       log_state()
+       {
+-         if (const char *env = std::getenv("VULKAN_WSI_DEBUG_LEVEL"))
++         const char *diagnostics = std::getenv("RUDROID_DIAGNOSTICS");
++         if (diagnostics != nullptr && std::strcmp(diagnostics, "1") == 0)
+          {
+-            std::from_chars(env, env + std::strlen(env), level);
++            level = 3;
++            if (const char *env = std::getenv("VULKAN_WSI_DEBUG_LEVEL"))
++            {
++               std::from_chars(env, env + std::strlen(env), level);
++            }
+          }
+       }
+    };
+    static log_state state;
+ 
+-   bool result = level <= state.level;
++   // Level zero is reserved; an upstream verbosity override cannot hide errors.
++   return level == 1 || (level > 1 && level <= state.level);
++}
++
++static bool check_and_print_log_level(int level)
++{
++   bool result = wsi_log_enabled(level);
+    if (result)
+    {
+       switch (level)
+@@ -92,6 +102,5 @@
+    }
+ }
+ 
+-#endif
+ 
+ } /* namespace util */
+--- a/util/log.hpp
++++ b/util/log.hpp
+@@ -51,16 +51,13 @@
+ #endif
+    ;
+ 
+-#ifdef NDEBUG
+-static constexpr bool wsi_log_enable = false;
+-#else
+-static constexpr bool wsi_log_enable = true;
+-#endif
++// Errors survive Release; ordinary messages require explicit diagnostics.
++bool wsi_log_enabled(int level);
+ 
+ #define WSI_LOG(level, ...)                                               \
+    do                                                                     \
+    {                                                                      \
+-      if (::util::wsi_log_enable)                                         \
++      if (::util::wsi_log_enabled(level))                                         \
+          ::util::wsi_log_message(level, __FILE__, __LINE__, __VA_ARGS__); \
+    } while (0)
  
 --- a/wsi/wayland/surface.cpp
 +++ b/wsi/wayland/surface.cpp
@@ -70,7 +163,7 @@
  
     VkResult vk_res = get_supported_formats_and_modifiers(wayland_display, surface_queue.get(), dmabuf_interface.get(),
                                                           supported_formats);
-@@ -275,9 +276,67 @@
+@@ -275,9 +276,68 @@
     return nullptr;
  }
  
@@ -94,6 +187,9 @@
 +      {
 +         return false;
 +      }
++      // This request-only proxy receives no events; keep it permanently on the
++      // connection's default queue so ownership transfers never race on wl_proxy_set_queue.
++      wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(shared_surface_sync), nullptr);
 +   }
 +   sync_next = sync_surfaces;
 +   sync_surfaces = this;
@@ -125,8 +221,6 @@
 +         if (item->wayland_display == wayland_display && item->wayland_surface == wayland_surface)
 +         {
 +            item->surface_sync_interface = std::move(surface_sync_interface);
-+            wl_proxy_set_queue(reinterpret_cast<wl_proxy *>(item->surface_sync_interface.get()),
-+                               item->surface_queue.get());
 +            break;
 +         }
 +      }
@@ -172,3 +266,214 @@
  
     friend void surface_registry_handler(void *data, struct wl_registry *wl_registry, uint32_t name,
                                          const char *interface, uint32_t version) VWL_API_POST;
+--- /dev/null
++++ b/wsi/wayland/surface_carrier.hpp
+@@ -0,0 +1,116 @@
++// INPUT: Instance extension selection, downstream Vulkan entrypoints and owned local surfaces.
++// OUTPUT: Explicit headless carrier opt-in with ordinary Wayland registration and failure cleanup.
++// POS: Rudroid compatibility policy; no fabricated handles or alternate presentation implementation.
++// Copyright 2026 jenny92-tech and the Rudroid contributors.
++// SPDX-License-Identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
++#pragma once
++
++#include "layer/private_data.hpp"
++#include "util/extension_list.hpp"
++#include "util/log.hpp"
++#include <cstdlib>
++#include <cstring>
++
++namespace wsi
++{
++namespace wayland
++{
++
++inline bool headless_surface_carrier_requested()
++{
++   const char *value = std::getenv("RUDROID_WSI_HEADLESS_SURFACE");
++   return value != nullptr && std::strcmp(value, "1") == 0;
++}
++
++/* Read the opt-in during instance creation, not again during surface creation.
++ * The layer owns Wayland queries/presentation; headless is only a real lower
++ * surface handle. Do not enable the lower extension for unrelated platforms. */
++inline VkResult enable_headless_surface_carrier(util::extension_list &extensions, bool requested, bool &enabled)
++{
++   enabled = false;
++   if (!requested || !extensions.contains(VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME))
++   {
++      return VK_SUCCESS;
++   }
++   if (!extensions.contains(VK_KHR_SURFACE_EXTENSION_NAME))
++   {
++      return VK_ERROR_EXTENSION_NOT_PRESENT;
++   }
++   if (!extensions.contains(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME))
++   {
++      VkResult result = extensions.add(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
++      if (result != VK_SUCCESS)
++      {
++         return result;
++      }
++   }
++   enabled = true;
++   return VK_SUCCESS;
++}
++
++/* Shared by production and the CPU fixture. make_surface returns an owner;
++ * register_surface transfers it only on success, using the existing instance
++ * map. A private candidate keeps the public output null on every failure. */
++template <typename MakeSurface, typename RegisterSurface>
++VkResult create_wayland_surface_carrier(const layer::dispatch_table &dispatch, bool opted_in, bool headless_enabled,
++                                       VkInstance instance, const VkWaylandSurfaceCreateInfoKHR *info,
++                                       const VkAllocationCallbacks *allocator, VkSurfaceKHR *out,
++                                       MakeSurface make_surface, RegisterSurface register_surface)
++{
++   *out = VK_NULL_HANDLE;
++   auto wayland = dispatch.get_fn<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR");
++   auto headless = dispatch.get_fn<PFN_vkCreateHeadlessSurfaceEXT>("vkCreateHeadlessSurfaceEXT");
++   auto destroy = dispatch.get_fn<PFN_vkDestroySurfaceKHR>("vkDestroySurfaceKHR");
++   if (!destroy.has_value() ||
++       (!wayland.has_value() && !(opted_in && headless_enabled && headless.has_value())))
++   {
++      WSI_LOG_ERROR("Downstream Wayland surface unavailable; headless carrier requires explicit opt-in and enabled entrypoints");
++      return VK_ERROR_EXTENSION_NOT_PRESENT;
++   }
++   if (!wayland.has_value() && (info->pNext != nullptr || info->flags != 0))
++   {
++      /* No pNext structures extend either create-info in the pinned registry.
++       * Never forward a Wayland chain to another structure or silently drop it. */
++      WSI_LOG_ERROR("Headless carrier cannot honor Wayland surface flags or pNext");
++      return VK_ERROR_FEATURE_NOT_PRESENT;
++   }
++
++   auto local = make_surface();
++   if (!local)
++   {
++      return VK_ERROR_OUT_OF_HOST_MEMORY;
++   }
++   VkSurfaceKHR candidate = VK_NULL_HANDLE;
++   VkResult result;
++   if (wayland.has_value())
++   {
++      result = (*wayland)(instance, info, allocator, &candidate);
++   }
++   else
++   {
++      const VkHeadlessSurfaceCreateInfoEXT headless_info{
++         VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT, nullptr, 0
++      };
++      result = (*headless)(instance, &headless_info, allocator, &candidate);
++   }
++   if (result != VK_SUCCESS)
++   {
++      return result;
++   }
++   if (candidate == VK_NULL_HANDLE)
++   {
++      WSI_LOG_ERROR("Downstream surface creation succeeded without a handle");
++      return VK_ERROR_INITIALIZATION_FAILED;
++   }
++   result = register_surface(candidate, local);
++   if (result != VK_SUCCESS)
++   {
++      (*destroy)(instance, candidate, allocator);
++      return result;
++   }
++   *out = candidate;
++   return VK_SUCCESS;
++}
++
++} // namespace wayland
++} // namespace wsi
+--- a/wsi/wayland/surface_properties.cpp
++++ b/wsi/wayland/surface_properties.cpp
+@@ -39,6 +39,7 @@
+ #include "surface_properties.hpp"
+ #include "surface.hpp"
+ #include "layer/private_data.hpp"
++#include "surface_carrier.hpp"
+ #include "wl_helpers.hpp"
+ #include "wl_object_owner.hpp"
+ #include "util/drm/drm_utils.hpp"
+@@ -371,23 +372,17 @@
+ {
+    auto &instance_data = layer::instance_private_data::get(instance);
+    util::allocator allocator{ instance_data.get_allocator(), VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, pAllocator };
+-   auto wsi_surface = surface::make_surface(allocator, pCreateInfo->display, pCreateInfo->surface);
+-   if (wsi_surface == nullptr)
+-   {
+-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+-   }
+-
+-   VkResult res = instance_data.disp.CreateWaylandSurfaceKHR(instance, pCreateInfo, pAllocator, pSurface);
+-   if (res == VK_SUCCESS)
+-   {
+-      auto surface_base = util::unique_ptr<wsi::surface>(std::move(wsi_surface));
+-      res = instance_data.add_surface(*pSurface, surface_base);
+-      if (res != VK_SUCCESS)
+-      {
+-         instance_data.disp.DestroySurfaceKHR(instance, *pSurface, pAllocator);
+-      }
+-   }
+-   return res;
++   return create_wayland_surface_carrier(
++      instance_data.disp, instance_data.headless_surface_carrier,
++      instance_data.is_instance_extension_enabled(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME),
++      instance, pCreateInfo, pAllocator, pSurface,
++      [&]() -> util::unique_ptr<wsi::surface> {
++         return util::unique_ptr<wsi::surface>(
++            surface::make_surface(allocator, pCreateInfo->display, pCreateInfo->surface));
++      },
++      [&](VkSurfaceKHR carrier, util::unique_ptr<wsi::surface> &local) {
++         return instance_data.add_surface(carrier, local);
++      });
+ }
+ 
+ PFN_vkVoidFunction surface_properties::get_proc_addr(const char *name)
+--- a/wsi/wayland/swapchain.cpp
++++ b/wsi/wayland/swapchain.cpp
+@@ -411,7 +411,13 @@
+ 
+    assert(image.data != nullptr);
+    auto image_data = static_cast<wayland_image_data *>(image.data);
+-   TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
++   // The first native GBM allocation also supplies the image's exact modifier
++   // layout. Reuse it here; do not reserve or leak a second buffer for a query.
++   if (!image_data->memory_allocated)
++   {
++      TRY_LOG(allocate_image(image_create_info, image_data), "Failed to allocate image");
++      image_data->memory_allocated = true;
++   }
+    image_status_lock.unlock();
+ 
+    TRY_LOG(create_wl_buffer(image_create_info, image, image_data), "Failed to create wl_buffer");
+@@ -461,11 +467,16 @@
+       }
+ 
+       wsialloc_format allocated_format = { 0 };
+-      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, true));
++      TRY_LOG_CALL(allocate_wsialloc(image_create_info, image_data, importable_formats, &allocated_format, false));
++      image_data->memory_allocated = true;
+ 
+       for (auto &prop : drm_format_props)
+       {
+          if (prop.drmFormatModifier == allocated_format.modifier)
+          {
+-            image_data->external_mem.set_num_memories(prop.drmFormatModifierPlaneCount);
++            if (prop.drmFormatModifierPlaneCount != image_data->external_mem.get_num_planes())
++            {
++               WSI_LOG_ERROR("Allocated modifier plane count disagrees with DRM format properties.");
++               return VK_ERROR_INITIALIZATION_FAILED;
++            }
+          }
+       }
+--- a/wsi/wayland/swapchain.hpp
++++ b/wsi/wayland/swapchain.hpp
+@@ -57,6 +57,7 @@
+ 
+    external_memory external_mem;
+    wl_buffer *buffer;
++   bool memory_allocated{ false };
+    sync_fd_fence_sync present_fence;
+ };
+ 

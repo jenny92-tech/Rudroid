@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -73,6 +74,25 @@ static int bridge_snprintf_chk(char *out, size_t size, int flags,
     va_end(args);
     return result;
 }
+static int bridge_vsprintf_chk(char *out, int flags, size_t capacity,
+        const char *format, va_list args) {
+    (void)flags;
+    // vsnprintf reports an int, so a larger write bound has no representable
+    // successful result. Clamp the native write bound without weakening the
+    // object-capacity abort check below.
+    size_t size = capacity > INT_MAX ? INT_MAX : capacity;
+    int result = vsnprintf(out, size, format, args);
+    if (result >= 0 && (size_t)result >= capacity) abort();
+    return result;
+}
+static int bridge_sprintf_chk(char *out, int flags, size_t capacity,
+        const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = bridge_vsprintf_chk(out, flags, capacity, format, args);
+    va_end(args);
+    return result;
+}
 
 static const RudroidSymbol symbols[] = {
     RUDROID_SYMBOL("fprintf", bridge_fprintf)
@@ -92,5 +112,7 @@ static const RudroidSymbol symbols[] = {
     RUDROID_SYMBOL("__strlen_chk", bridge_strlen_chk)
     RUDROID_SYMBOL("__vsnprintf_chk", bridge_vsnprintf_chk)
     RUDROID_SYMBOL("__snprintf_chk", bridge_snprintf_chk)
+    RUDROID_SYMBOL("__vsprintf_chk", bridge_vsprintf_chk)
+    RUDROID_SYMBOL("__sprintf_chk", bridge_sprintf_chk)
 };
 RUDROID_SYMBOL_PROVIDER(stdio_format, symbols)

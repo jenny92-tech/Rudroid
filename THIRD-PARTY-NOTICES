@@ -1,6 +1,6 @@
 Third-party notices — Rudroid Rust dependencies
 
-Generated from crates/Cargo.lock (SHA256 7989c6f40b26d5241206d696be980b1b71e141fd078d75886602f3f2b23a94a6).
+Generated from crates/Cargo.lock (SHA256 dad8cd795a36f86ae89d801c93d4c8006b9f0d117a72054f8fb6ca732dea64d0).
 The inventory includes locked build-only and target-specific dependencies; it
 does not assert that each one is linked into the ARM64 production runtime.
 Each package retains its own license expression and copyright notices below.
@@ -11,6 +11,37 @@ receipts and license files alongside vulkan-wsi/. The JNI fixture retains its
 AOSP Apache-2.0 header. Host libraries and external games/assets are separate
 inputs. Companion launcher licenses belong to that project's distribution.
 The root noncommercial license does not replace these third-party terms.
+
+PortMaster-Unity Mono bridge ABI, offline Steam, desktop pacing and dynamic GLES geometry
+============================================================
+Source: wild1walker/portmaster-unity@7f617e282953f8981ca4a38537277a8a9983ff90
+https://github.com/wild1walker/portmaster-unity/tree/7f617e282953f8981ca4a38537277a8a9983ff90
+Original files: runtime/mono64/il2cpp_mono.h, runtime/host/steamstub.c, runtime/host/framerate.c,
+and the whole-range invalidation distinction in runtime/host/glarena.c.
+Rudroid adaptations: crates/capability/unity/mono/src/lib.rs, steam.rs and pacing.rs.
+The GLES adaptation is crates/capability/linux/sdl_runtime/src/geometry_map.rs.
+
+MIT License
+
+Copyright (c) 2026 wild1walker
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 Vendored AOSP native code
 ========================

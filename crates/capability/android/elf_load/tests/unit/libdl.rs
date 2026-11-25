@@ -2,6 +2,23 @@
 //! OUTPUT:  `tests` unit tests, compiled into the crate only under cfg(test)
 //! POS:    keeps test bodies out of `src/libdl.rs`; declared there with `#[path]`
 use super::*;
+
+#[test]
+fn native_companion_fallback_runs_only_on_an_ordinary_miss() {
+    let mut calls = 0;
+    for reject in [
+        super::super::ExportReject::Tls,
+        super::super::ExportReject::MalformedVersion(super::super::elf::ElfError::TruncatedSection("versym")),
+    ] {
+        assert_eq!(companion_fallback(Err(reject.clone()), || { calls += 1; Some(0x1234) }), Err(reject));
+    }
+    assert_eq!(calls, 0, "a native library cannot bypass a guest rejection");
+    assert_eq!(companion_fallback(Ok(Some(0x5678)), || { calls += 1; Some(0x1234) }), Ok(Some(0x5678)));
+    assert_eq!(calls, 0, "the higher-priority namespace still wins");
+    assert_eq!(companion_fallback(Ok(None), || { calls += 1; Some(0x1234) }), Ok(Some(0x1234)));
+    assert_eq!(calls, 1, "a real miss preserves native companion support");
+}
+
 #[test]
 fn iterator_prefix_and_library_versions_are_explicit() {
     assert_eq!(std::mem::size_of::<PhdrInfo>(), 32);
@@ -11,7 +28,8 @@ fn iterator_prefix_and_library_versions_are_explicit() {
             "dl_iterate_phdr",
             Some(SymbolVersion {
                 file: "libdl.so",
-                name: "LIBC"
+                name: "LIBC",
+                hash: 0,
             })
         ),
         0
@@ -20,10 +38,12 @@ fn iterator_prefix_and_library_versions_are_explicit() {
         SymbolVersion {
             file: "libc.so",
             name: "LIBC",
+            hash: 0,
         },
         SymbolVersion {
             file: "libdl.so",
             name: "LIBC_PRIVATE",
+            hash: 0,
         },
     ] {
         assert_eq!(symbol("dl_iterate_phdr", Some(v)), 0);

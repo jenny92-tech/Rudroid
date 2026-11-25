@@ -2,7 +2,7 @@
 //! OUTPUT: original-first/name-gated fallback and paired GC handles, including unwind
 //! POS: title behavior regression; the real game test separately covers actual metadata/detour
 use super::*;
-use rudroid_common::il2cpp_abi::GcHandleAbi;
+use rudroid_unity_common::il2cpp_abi::GcHandleAbi;
 use rudroid_common::registry::HostStr;
 use std::cell::RefCell;
 use std::ffi::c_char;
@@ -22,6 +22,7 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 static FALLBACK: OnceLock<TestString> = OnceLock::new();
 // Unity 6 uses pointer-width GC handles, unlike older IL2CPP releases.
 const HANDLE: usize = usize::MAX - 42;
+extern "C" fn attached() -> *mut c_void { std::ptr::dangling_mut::<u8>().cast() }
 fn fallback() -> *mut c_void {
     FALLBACK.get_or_init(|| TestString("Sprites/Default".encode_utf16().collect()))
         as *const TestString as *mut c_void
@@ -90,6 +91,7 @@ unsafe extern "C-unwind" fn find(name: *mut c_void, _method: *mut c_void) -> *mu
 }
 extern "C" fn so_symbol(_module: *mut c_void, name: HostStr<'_>) -> usize {
     match name.to_cstr().unwrap_or_default().to_bytes() {
+        b"il2cpp_thread_current" => attached as usize,
         b"il2cpp_string_length" => length as usize,
         b"il2cpp_string_chars" => chars as usize,
         b"il2cpp_string_new" => new as usize,

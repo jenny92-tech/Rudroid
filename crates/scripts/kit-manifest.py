@@ -24,20 +24,42 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from kit_markers import production_build_issue
 
 KIT_ID_RE = re.compile(rb"rust-kit-[0-9a-f]{16}(?:-ci-[0-9A-Za-z._-]{1,64})?")
 MANIFEST_FORMAT = 1
+DEPLOY_NAME_ALIASES = {
+    "libreply_catalog.so": "librudroid_android_reply_catalog.so",
+    "libreply_catalog.dylib": "librudroid_android_reply_catalog.dylib",
+    "unityloader": "rudroid-unity-loader",
+    "rudroid-loader": "rudroid-unity-loader",
+}
 
 
 def is_kit_member_file(path: Path) -> bool:
-    if path.name.endswith(".so"):
+    if not path.is_file():
+        return False
+    if path.suffix in (".so", ".dylib"):
         return True
-    return path.is_file() and path.name == "rudroid-unity-loader"
+    return path.name in ("rudroid-unity-loader", "rudroid-loader", "unityloader")
+
+
+def iter_member_paths(root: Path, include_subdirs: bool) -> list[Path]:
+    found = [p for p in sorted(root.iterdir()) if is_kit_member_file(p)]
+    if include_subdirs:
+        for subname in ("plugins", "gamepatchs"):
+            subdir = root / subname
+            if subdir.is_dir():
+                found.extend(
+                    p for p in sorted(subdir.iterdir()) if p.is_file() and p.suffix in (".so", ".dylib")
+                )
+    return found
 
 
 def ids_in_file(path: Path) -> list[str]:
@@ -45,21 +67,26 @@ def ids_in_file(path: Path) -> list[str]:
     return sorted({match.decode("ascii") for match in KIT_ID_RE.findall(data)})
 
 
-def scan_dir(build_dir: Path) -> dict[str, str]:
+def scan_dir(build_dir: Path, *, require_all: bool = False) -> dict[str, str]:
     if not build_dir.is_dir():
         print(f"error: not a directory: {build_dir}", file=sys.stderr)
         raise SystemExit(2)
     members: dict[str, str] = {}
-    for path in sorted(build_dir.iterdir()):
-        if not is_kit_member_file(path):
-            continue
+    for path in iter_member_paths(build_dir, include_subdirs=require_all):
+        rel = path.relative_to(build_dir).as_posix()
         found = ids_in_file(path)
         if not found:
+            if require_all:
+                print(
+                    f"error: {rel} carries no rust-kit runtime_build_id (foreign or unconfigured binary)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
             continue
         issue = production_build_issue(path)
         if issue is not None:
             print(
-                f"error: {path.name} is not a production artifact ({issue}): "
+                f"error: {rel} is not a production artifact ({issue}): "
                 "Release identity is required; rebuild through "
                 "docker-rust.sh without --pgo-generate",
                 file=sys.stderr,
@@ -67,11 +94,11 @@ def scan_dir(build_dir: Path) -> dict[str, str]:
             raise SystemExit(1)
         if len(found) > 1:
             print(
-                f"error: {path.name} carries multiple kit ids ({', '.join(found)})",
+                f"error: {rel} carries multiple kit ids ({', '.join(found)})",
                 file=sys.stderr,
             )
             raise SystemExit(1)
-        members[path.name] = found[0]
+        members[rel] = found[0]
     if not members:
         print(
             f"error: no kit member ids found in {build_dir} "
@@ -107,9 +134,17 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "members": dict(sorted(members.items())),
     }
     output = Path(args.output)
-    output.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=".kit-manifest-", dir=output.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, output)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
     print(f"kit_id={kit_id} members={len(members)} manifest={output}")
     return 0
 
@@ -121,23 +156,33 @@ def cmd_verify(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as err:
         print(f"error: cannot read manifest {manifest_path}: {err}", file=sys.stderr)
         return 2
-    if manifest.get("format") != MANIFEST_FORMAT or "kit_id" not in manifest:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("format") != MANIFEST_FORMAT
+        or not isinstance(manifest.get("kit_id"), str)
+        or not isinstance(manifest.get("members", {}), dict)
+    ):
         print(f"error: unsupported manifest format: {manifest_path}", file=sys.stderr)
         return 2
     recorded_kit_id = manifest["kit_id"]
     recorded_members: dict[str, str] = manifest.get("members", {})
 
-    members = scan_dir(Path(args.dir))
+    members = scan_dir(Path(args.dir), require_all=True)
     failures = []
     for name, found in sorted(members.items()):
+        basename = Path(name).name
         expected = recorded_members.get(name)
+        if expected is None:
+            expected = recorded_members.get(basename)
+        if expected is None and basename in DEPLOY_NAME_ALIASES:
+            expected = recorded_members.get(DEPLOY_NAME_ALIASES[basename])
         if expected is None:
             if found == recorded_kit_id:
                 print(f"note: {name} not in manifest but matches the kit id (new member)")
             else:
                 failures.append(
                     f"{name}: carries {found}, which is neither its recorded id "
-                    f"({recorded_members.get(name, 'n/a')}) nor the kit id ({recorded_kit_id})"
+                    f"(n/a) nor the kit id ({recorded_kit_id})"
                 )
         elif expected != found:
             failures.append(f"{name}: recorded {expected} but found {found}")

@@ -197,11 +197,11 @@ fn run_lifecycle(kit: &Kit) -> Result<Vec<guest::ModuleEvent>, Box<dyn std::erro
     host_api::install_config(Some(config.clone())).unwrap();
     let capabilities = unsafe { load_deploy_dir(&kit.deploy, &Selection::All) }?;
     let capabilities = bring_up(capabilities, None)?;
-    runtime::prepare_unity_runtime(&capabilities)?;
+    runtime::prepare_engine_runtime(&capabilities)?;
     let plan = GuestPlan::from_config(&config)?;
     let events = unsafe { guest::bring_up(&capabilities, &plan) }?;
-    runtime::bootstrap_unity_runtime(&capabilities, "lib/arm64-v8a")?;
-    assert_eq!(runtime::run_unity_runtime(&capabilities)?, runtime::UnityRunCompletion::Stopped);
+    runtime::bootstrap_engine_runtime(&capabilities, "lib/arm64-v8a")?;
+    assert_eq!(runtime::run_engine_runtime(&capabilities)?, runtime::EngineRunCompletion::Stopped);
     // Handles stay open for the process life (pinned kit, ticket 46).
     std::mem::forget(capabilities);
     Ok(events)
@@ -246,6 +246,17 @@ const UNITY_2021_3: ProfileCase = ProfileCase {
     pad_init_signature: c"(Landroid/content/Context;)Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;",
 };
 
+const UNITY_2022_3: ProfileCase = ProfileCase {
+    package: "rudroid-unity-profile-2022-3",
+    artifact: "unity_2022_3",
+    tag: "UNITY2022",
+    registered: "Unity 2022.3 JNI and early engine profile registered",
+    player_class: "com/unity3d/player/UnityPlayer",
+    init_signature: "(Landroid/content/Context;)V",
+    init_event: "kind=INIT_JNI_CTX(3) a=0x0 b=0x1",
+    pad_init_signature: c"(Landroid/content/Context;)Lcom/unity3d/player/PlayAssetDeliveryUnityWrapper;",
+};
+
 const UNITY_6: ProfileCase = ProfileCase {
     package: "rudroid-unity-profile-6",
     artifact: "unity_6",
@@ -261,7 +272,7 @@ const UNITY_6: ProfileCase = ProfileCase {
 /// Every engine profile in the workspace. A new Unity version adds a row
 /// here (enforced by `every_workspace_unity_profile_is_under_the_contract`)
 /// and inherits the whole contract instead of a thinner copy.
-const PROFILES: [&ProfileCase; 2] = [&UNITY_2021_3, &UNITY_6];
+const PROFILES: [&ProfileCase; 3] = [&UNITY_2021_3, &UNITY_2022_3, &UNITY_6];
 
 /// The full reference sequence for one profile, observed through the
 /// capability/runner log and the spy's own event buffer.
@@ -325,10 +336,10 @@ fn assert_lifecycle_contract(case: &ProfileCase) {
     let expected = [
         format!("[{tag}] {}", case.registered),
         format!("[{tag}] active engine profile={artifact} player={}", case.player_class),
-        format!("[PROFILE] unity profile prepared: {artifact}"),
+        format!("[PROFILE] engine profile prepared: {artifact}"),
         format!("[{tag}] calling NativeLoader.load(lib/arm64-v8a)"),
         format!("[{tag}] NativeLoader.load(lib/arm64-v8a) returned true"),
-        format!("[PROFILE] unity profile bootstrapped: {artifact}"),
+        format!("[PROFILE] engine profile bootstrapped: {artifact}"),
         format!("[{tag}] calling initJni ({})", case.init_signature),
         format!("[{tag}] calling nativeRecreateGfxState"),
         format!("[{tag}] calling nativeRestartActivityIndicator"),
@@ -338,7 +349,7 @@ fn assert_lifecycle_contract(case: &ProfileCase) {
         format!("[{tag}] nativeRender returned true; entering render loop"),
         format!("[{tag}] render loop complete: 3 frames rendered (player stopped)"),
         "[android_base] flush_preferences".to_owned(),
-        format!("[PROFILE] unity profile run complete: {artifact}"),
+        format!("[PROFILE] engine profile run complete: {artifact}"),
     ];
     assert_log_sequence(log, &expected.iter().map(String::as_str).collect::<Vec<_>>());
     // The spy's own event buffer, echoed by the profile: the exact call
@@ -378,6 +389,11 @@ fn assert_lifecycle_contract(case: &ProfileCase) {
 #[test]
 fn profile_lifecycle_contract_unity_2021_3() {
     assert_lifecycle_contract(&UNITY_2021_3);
+}
+
+#[test]
+fn profile_lifecycle_contract_unity_2022_3() {
+    assert_lifecycle_contract(&UNITY_2022_3);
 }
 
 #[test]
@@ -456,7 +472,8 @@ fn native_loader_false_return_fails_bootstrap() {
         let error = run_lifecycle(&kit).expect_err("a false NativeLoader.load must fail");
         let message = error.to_string();
         assert!(
-            message.contains("failed at the bootstrap stage") && message.contains("NativeLoader.load"),
+            message.contains("failed at the bootstrap stage")
+                && message.contains("the profile bootstrap returned"),
             "{}: the failure names the stage and the guest refusal: {message}",
             case.artifact
         );
@@ -599,7 +616,9 @@ fn build_cli_kit(profile_artifact: &Path, spy: &Path) -> CliKit {
 
 fn cli_command(kit: &CliKit) -> Command {
     let mut command = Command::new(BIN);
-    command.arg(&kit.dir).arg("--config").arg(&kit.config)
+    // Lifecycle evidence is emitted only for an explicitly diagnostic run.
+    command.env("RUDROID_DIAGNOSTICS", "1")
+        .arg(&kit.dir).arg("--config").arg(&kit.config)
         .env_remove("RUDROID_SKIP_GUEST");
     command
 }
@@ -611,6 +630,45 @@ fn run_cli(kit: &CliKit) -> (i32, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+#[test]
+fn cli_pre_render_hold_requires_diagnostics_and_preserves_real_lifecycle() {
+    let spy = compile_spy(&[], "rudroid53_spy.so");
+    for case in PROFILES {
+        let profile = ensure_cdylib(case.package, case.artifact);
+        let kit = build_cli_kit(&profile, &spy);
+        let output = cli_command(&kit).env("RUDROID_DIAGNOSTICS", "1")
+            .env("RUDROID_DIAGNOSTIC_PRE_RENDER_HOLD_MS", "100").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{}: {stderr}", case.artifact);
+        let focus = stderr.find("calling nativeFocusChanged(true)").unwrap();
+        let begin = stderr.find("diagnostic pre-render hold begin: milliseconds=100 nativeRender_calls=0").unwrap();
+        let end = stderr.find("diagnostic pre-render hold complete:").unwrap();
+        let elapsed: u128 = stderr[end..].split("elapsed_ms=").nth(1).unwrap()
+            .split_whitespace().next().unwrap().parse().unwrap();
+        assert!(elapsed >= 100, "hold duration must exclude process startup: {stderr}");
+        let frame = stderr.find("nativeRender returned true;").unwrap();
+        assert!(focus < begin && begin < end && end < frame, "{stderr}");
+        assert_eq!(stderr.matches("kind=RENDER(").count(), 3, "hold must not replace a native render: {stderr}");
+        assert_eq!(stderr.matches("kind=DONE(").count(), 1, "{stderr}");
+
+        // A production/quiet run must ignore even the longest valid hold.
+        let started = std::time::Instant::now();
+        let output = cli_command(&kit).env("RUDROID_DIAGNOSTICS", "0")
+            .env("RUDROID_DIAGNOSTIC_PRE_RENDER_HOLD_MS", "30000").output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(15), "quiet run unexpectedly waited");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("diagnostic pre-render hold"));
+
+        let output = cli_command(&kit).env("RUDROID_DIAGNOSTICS", "1")
+            .env("RUDROID_DIAGNOSTIC_PRE_RENDER_HOLD_MS", "30001").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{stderr}");
+        assert!(stderr.contains("diagnostic pre-render hold rejected:"), "{stderr}");
+        assert!(!stderr.contains("diagnostic pre-render hold begin:"), "{stderr}");
+        assert_eq!(stderr.matches("kind=RENDER(").count(), 3, "{stderr}");
+    }
 }
 
 #[test]
@@ -722,18 +780,175 @@ fn cli_run_reports_a_started_engine_and_exits_zero() {
     // Reference bring-up order on the full stderr: prepare runs BEFORE the
     // guest main module is mapped, bootstrap and run after it.
     let prepared = stderr
-        .find("[PROFILE] unity profile prepared: unity_2021_3")
+        .find("[PROFILE] engine profile prepared: unity_2021_3")
         .expect("prepare logged on stderr");
     let mapped = stderr
         .find("[GUEST] exec-mapped lib/arm64-v8a/libmain.so")
         .expect("guest mapping logged on stderr");
     let bootstrapped = stderr
-        .find("[PROFILE] unity profile bootstrapped")
+        .find("[PROFILE] engine profile bootstrapped")
         .expect("bootstrap logged on stderr");
     assert!(
         prepared < mapped && mapped < bootstrapped,
         "reference order: prepare → guest modules → bootstrap"
     );
+}
+
+#[test]
+fn cli_threaded_player_owns_handler_looper_and_preserves_callback_errors() {
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    for throws in [false,true] {
+        let mut flags=vec!["-DRUDROID_SPY_UI_JOBS","-DRUDROID_SPY_OWNER_JOBS"];
+        if throws {flags.push("-DRUDROID_SPY_UI_JOB_THROWS");}
+        let spy=compile_spy(&flags,if throws {"rudroid53_owner_error.so"} else {"rudroid53_owner_jobs.so"});
+        for separate in [false,true] {
+            let kit=build_cli_kit(&profile,&spy);
+            let config=std::fs::read_to_string(&kit.config).unwrap();
+            std::fs::write(&kit.config,format!("{config}\nseparate_player_thread = {separate}\n")).unwrap();
+            let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+            let stderr=String::from_utf8_lossy(&output.stderr);
+            if separate && !throws {
+                assert!(output.status.success(),"{stderr}");
+                assert_eq!(stderr.lines().filter(|line|line.contains("kind=RENDER(")).count(),3,"{stderr}");
+                assert!(stderr.contains("a=0x3 b=0x2 text=\"UI jobs\""),"reposts must advance on later owner drains: {stderr}");
+            } else {
+                assert_eq!(output.status.code(),Some(1),"{stderr}");
+                assert_eq!(stderr.lines().filter(|line|line.contains("kind=RENDER(")).count(),1,"{stderr}");
+                assert!(!String::from_utf8_lossy(&output.stdout).contains("result=started"));
+            }
+            assert_eq!(stderr.lines().filter(|line|line.contains("kind=DONE(")).count(),1,"{stderr}");
+            std::fs::remove_dir_all(kit.dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn cli_threaded_player_restores_worker_exception_after_native_cleanup() {
+    let spy=compile_spy(&["-DRUDROID_SPY_UI_JOBS","-DRUDROID_SPY_UI_WAIT","-DRUDROID_SPY_RENDER_THROWS_AT=2"],"rudroid53_spy_thread_exception.so");
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    let kit=build_cli_kit(&profile,&spy);
+    let config=std::fs::read_to_string(&kit.config).unwrap();
+    std::fs::write(&kit.config,format!("{config}\nseparate_player_thread = true\n")).unwrap();
+    let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+    let stderr=String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(),Some(1),"{stderr}");
+    assert_eq!(stderr.lines().filter(|line|line.contains("kind=RENDER(")).count(),2);
+    assert_eq!(stderr.lines().filter(|line|line.contains("kind=DONE(")).count(),1);
+    assert!(stderr.contains("player cleanup reported an exception"),"{stderr}");
+    assert!(stderr.contains("a=0x1 b=0x2 text=\"UI terminal\""),"{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("result=started"));
+    std::fs::remove_dir_all(kit.dir).unwrap();
+}
+
+#[test]
+fn cli_threaded_player_rejects_process_exit_policy_before_initialization() {
+    let spy=compile_spy(&[],"rudroid53_spy_thread_fast_exit.so");
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    let kit=build_cli_kit(&profile,&spy);
+    let config=std::fs::read_to_string(&kit.config).unwrap();
+    std::fs::write(&kit.config,format!("{config}\nseparate_player_thread = true\nfast_exit = true\n")).unwrap();
+    let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+    let stderr=String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(),Some(1),"{stderr}");
+    assert!(stderr.contains("separate_player_thread cannot be combined with fast_exit"),"{stderr}");
+    assert!(!stderr.contains("calling initJni"),"{stderr}");
+    assert!(!stderr.contains("native player owner attached"),"{stderr}");
+    std::fs::remove_dir_all(kit.dir).unwrap();
+}
+
+#[test]
+fn cli_threaded_player_services_ui_during_render_and_native_done() {
+    let spy=compile_spy(&["-DRUDROID_SPY_UI_JOBS","-DRUDROID_SPY_UI_WAIT"],"rudroid53_spy_ui_wait.so");
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    for enabled in [false,true] {
+        let kit=build_cli_kit(&profile,&spy);
+        let config=std::fs::read_to_string(&kit.config).unwrap();
+        std::fs::write(&kit.config,format!("{config}\nseparate_player_thread = {enabled}\n")).unwrap();
+        let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+        let stderr=String::from_utf8_lossy(&output.stderr);
+        if enabled {
+            assert!(output.status.success(),"{stderr}");
+            assert_eq!(stderr.lines().filter(|line|line.contains("kind=RENDER(")).count(),3);
+            assert!(stderr.contains("a=0x1 b=0x2 text=\"UI terminal\""),"{stderr}");
+            let creator=stderr.lines().find(|line|line.contains("initJni owner:")).unwrap().split("thread=").nth(1).unwrap();
+            let worker=stderr.lines().find(|line|line.contains("native player owner attached:")).unwrap().split("thread=").nth(1).unwrap();
+            assert_ne!(creator,worker,"native loop must have an independent owner: {stderr}");
+        } else {assert_eq!(output.status.code(),Some(1),"single-thread control must expose the blocked UI: {stderr}");}
+        assert_eq!(stderr.lines().filter(|line|line.contains("kind=DONE(")).count(),1);
+        assert!(stderr.contains("cleanup completed"),"{stderr}");
+        std::fs::remove_dir_all(kit.dir).unwrap();
+    }
+}
+
+#[test]
+fn cli_threaded_player_preserves_creator_exception_and_cleanup() {
+    let spy=compile_spy(&["-DRUDROID_SPY_UI_JOBS","-DRUDROID_SPY_UI_WAIT","-DRUDROID_SPY_UI_JOB_THROWS"],"rudroid53_spy_thread_ui_exception.so");
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    let kit=build_cli_kit(&profile,&spy);
+    let config=std::fs::read_to_string(&kit.config).unwrap();
+    std::fs::write(&kit.config,format!("{config}\nseparate_player_thread = true\n")).unwrap();
+    let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+    let stderr=String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(),Some(1),"{stderr}");
+    assert_eq!(stderr.lines().filter(|line|line.contains("kind=RENDER(")).count(),1);
+    assert_eq!(stderr.lines().filter(|line|line.contains("kind=DONE(")).count(),1);
+    assert!(stderr.contains("a=0x1 b=0x2 text=\"UI terminal\""),"cleanup still needs creator UI: {stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("result=started"));
+    std::fs::remove_dir_all(kit.dir).unwrap();
+}
+
+#[test]
+fn cli_ui_jobs_advance_between_actual_native_frames() {
+    let spy = compile_spy(&["-DRUDROID_SPY_UI_JOBS"], "rudroid53_spy_ui_jobs.so");
+    for case in PROFILES {
+        let profile = ensure_cdylib(case.package, case.artifact);
+        let kit = build_cli_kit(&profile, &spy);
+        let output = cli_command(&kit).env("RUDROID_DIAGNOSTICS", "1").output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{}: {stderr}", case.artifact);
+        assert_eq!(stderr.lines().filter(|line| line.contains("kind=RENDER(")).count(), 3);
+        for frame in 1..=3 {
+            let marker = format!("a={frame:#x} b={:#x} text=\"UI jobs\"", frame - 1);
+            assert!(stderr.lines().any(|line| line.contains("kind=RENDER(") && line.contains(&marker)), "{stderr}");
+        }
+        std::fs::remove_dir_all(kit.dir).unwrap();
+    }
+}
+
+#[test]
+fn cli_ui_job_exception_stops_before_next_native_frame() {
+    let spy = compile_spy(&["-DRUDROID_SPY_UI_JOBS", "-DRUDROID_SPY_UI_JOB_THROWS"], "rudroid53_spy_ui_exception.so");
+    let profile = ensure_cdylib(UNITY_2022_3.package, UNITY_2022_3.artifact);
+    let kit = build_cli_kit(&profile, &spy);
+    let output = cli_command(&kit).env("RUDROID_DIAGNOSTICS", "1").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("a pending exception interrupted UI job dispatch"), "{stderr}");
+    assert_eq!(stderr.lines().filter(|line| line.contains("kind=RENDER(")).count(), 1);
+    assert_eq!(stderr.lines().filter(|line| line.contains("kind=DONE(")).count(), 1);
+    assert!(stderr.contains("cleanup completed"), "{stderr}");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("result=started"));
+    std::fs::remove_dir_all(kit.dir).unwrap();
+}
+
+#[test]
+fn cli_frame_phase_metadata_preserves_three_real_native_calls() {
+    let spy=compile_spy(&[],"rudroid53_spy_phase_metadata.so");
+    let profile=ensure_cdylib(UNITY_2022_3.package,UNITY_2022_3.artifact);
+    let kit=build_cli_kit(&profile,&spy);
+    let mut config=std::fs::read_to_string(&kit.config).unwrap();
+    config.push_str("log_frame_progress = true\n");
+    std::fs::write(&kit.config,config).unwrap();
+    let output=cli_command(&kit).env("RUDROID_DIAGNOSTICS","1").output().unwrap();
+    let stderr=String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(),"{stderr}");
+    assert_eq!(stderr.lines().filter(|s|s.contains("kind=RENDER(")).count(),3);
+    for call in 1..=3 {
+        assert!(stderr.contains(&format!("render phase: nativeRender begin call={call}")),"{stderr}");
+        assert!(stderr.contains(&format!("render phase: nativeRender end call={call} returned=true")),"{stderr}");
+        assert!(stderr.contains(&format!("render phase: input pump end call={call} result=Ok(false)")),"{stderr}");
+    }
+    std::fs::remove_dir_all(kit.dir).unwrap();
 }
 
 #[test]

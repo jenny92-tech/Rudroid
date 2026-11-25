@@ -12,6 +12,10 @@ name = "unity_6"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+diag-probes = ["rudroid-unity-player-lifecycle/diag-probes"]
+
 [dependencies]
 rudroid-common = { path = "../../../common" }
+rudroid-unity-common = { path = "../common" }
 rudroid-unity-player-lifecycle = { path = "../player_lifecycle" }

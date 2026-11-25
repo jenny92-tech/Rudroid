@@ -106,18 +106,7 @@ pub extern "C" fn rudroid_bionic_stdio_standard(index: u32) -> *mut File {
     }
 }
 
-unsafe fn wrap(host: *mut libc::FILE, mode: *const c_char) -> *mut File {
-    if host.is_null() {
-        return ptr::null_mut();
-    }
-    // Only this plain C-layout object belongs to the C heap; no Rust Box/Vec
-    // or borrowed Rust payload ever enters the guest free/fclose path.
-    let facade = libc::calloc(1, std::mem::size_of::<File>()).cast::<File>();
-    if facade.is_null() {
-        libc::fclose(host);
-        *libc::__errno_location() = libc::ENOMEM;
-        return ptr::null_mut();
-    }
+unsafe fn mode_flags(mode: *const c_char) -> c_int {
     let flags = if mode.is_null() {
         16
     } else {
@@ -130,6 +119,22 @@ unsafe fn wrap(host: *mut libc::FILE, mode: *const c_char) -> *mut File {
             8
         }
     };
+    flags
+}
+
+unsafe fn wrap(host: *mut libc::FILE, mode: *const c_char) -> *mut File {
+    if host.is_null() {
+        return ptr::null_mut();
+    }
+    // Only this plain C-layout object belongs to the C heap; no Rust Box/Vec
+    // or borrowed Rust payload ever enters the guest free/fclose path.
+    let facade = libc::calloc(1, std::mem::size_of::<File>()).cast::<File>();
+    if facade.is_null() {
+        libc::fclose(host);
+        *libc::__errno_location() = libc::ENOMEM;
+        return ptr::null_mut();
+    }
+    let flags = mode_flags(mode);
     ptr::addr_of_mut!((*facade).cookie).write(host);
     ptr::addr_of_mut!((*facade).fd).write(libc::fileno(host));
     ptr::addr_of_mut!((*facade).flags).write(flags);
@@ -147,6 +152,42 @@ unsafe extern "C" fn open(path: *const c_char, mode: *const c_char) -> *mut File
 }
 unsafe extern "C" fn fdopen(fd: c_int, mode: *const c_char) -> *mut File {
     wrap(libc::fdopen(fd, mode), mode)
+}
+unsafe extern "C" fn reopen(path: *const c_char, mode: *const c_char, file: *mut File) -> *mut File {
+    let host = rudroid_bionic_stdio_native(file);
+    if host.is_null() {
+        return ptr::null_mut();
+    }
+    let mapped = if path.is_null() {
+        ptr::null_mut()
+    } else {
+        super::posix::rudroid_bionic_asset_path(path)
+    };
+    // A null filename asks the native implementation to change only the mode.
+    let reopened = libc::freopen(if mapped.is_null() { path } else { mapped }, mode, host);
+    let saved_errno = *libc::__errno_location();
+    libc::free(mapped.cast());
+    *libc::__errno_location() = saved_errno;
+    if reopened.is_null() {
+        // Native freopen consumed/closed the old stream on failure. Invalidate
+        // the facade so no later operation can reuse that host FILE pointer.
+        // A failed freopen need not be followed by fclose, so release a heap
+        // facade here; static standard streams are only invalidated.
+        ptr::addr_of_mut!((*file).cookie).write(ptr::null_mut());
+        ptr::addr_of_mut!((*file).fd).write(-1);
+        ptr::addr_of_mut!((*file).flags).write(0);
+        let base = standards();
+        let standard = file == base || file == base.add(1) || file == base.add(2);
+        if !standard {
+            libc::free(file.cast());
+        }
+        *libc::__errno_location() = saved_errno;
+        return ptr::null_mut();
+    }
+    ptr::addr_of_mut!((*file).cookie).write(reopened);
+    ptr::addr_of_mut!((*file).fd).write(libc::fileno(reopened));
+    ptr::addr_of_mut!((*file).flags).write(mode_flags(mode));
+    file
 }
 unsafe extern "C" fn tmpfile() -> *mut File {
     wrap(libc::tmpfile(), ptr::null())
@@ -235,6 +276,27 @@ unsafe extern "C" fn setbuf(file: *mut File, buffer: *mut c_char) {
     let (mode, size) = if buffer.is_null() { (2, 0) } else { (0, 1024) };
     setvbuf(file, buffer, mode, size);
 }
+unsafe extern "C" fn popen(command: *const c_char, mode: *const c_char) -> *mut File {
+    wrap(libc::popen(command, mode), mode)
+}
+unsafe extern "C" fn pclose(file: *mut File) -> c_int {
+    let host = rudroid_bionic_stdio_native(file);
+    if host.is_null() {
+        return -1;
+    }
+    let base = standards();
+    if file == base || file == base.add(1) || file == base.add(2) {
+        *libc::__errno_location() = libc::EINVAL;
+        return -1;
+    }
+    let result = libc::pclose(host);
+    let saved_errno = *libc::__errno_location();
+    libc::free(file.cast());
+    // Older supported glibc versions do not promise free preserves errno.
+    // Keep pclose's wait/flush failure visible after facade deallocation.
+    *libc::__errno_location() = saved_errno;
+    result
+}
 unsafe extern "C" fn getpos(file: *mut File, position: *mut i64) -> c_int {
     let offset = tell(file);
     if offset == -1 {
@@ -292,6 +354,7 @@ symbol_provider! {
     },
     b"fopen" | b"fopen64" => open as *const () as usize,
     b"fdopen" => fdopen as *const () as usize,
+    b"freopen" => reopen as *const () as usize,
     b"tmpfile" | b"tmpfile64" => tmpfile as *const () as usize,
     b"fclose" => close as *const () as usize,
     b"fgetc" | b"getc" => getchar as *const () as usize,
@@ -318,6 +381,8 @@ symbol_provider! {
     b"fgets" => gets as *const () as usize,
     b"fputs" => fputs as *const () as usize,
     b"puts" => puts as *const () as usize,
+    b"popen" => popen as *const () as usize,
+    b"pclose" => pclose as *const () as usize,
     b"fflush" => flush as *const () as usize,
     b"setbuf" => setbuf as *const () as usize,
     b"setvbuf" => setvbuf as *const () as usize,

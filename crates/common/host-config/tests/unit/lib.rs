@@ -5,37 +5,84 @@ use super::*;
 
 #[test]
 fn vulkan_linear_rendering_preserves_the_separate_gles_filter_and_measured_output() {
-    for percent in [100,75,50] {
+    for percent in [100, 75, 50] {
         let mut config=HostConfig::parse(&format!("[gpu]\ngraphicsApi='vulkan'\nrenderScalePercent={percent}\nrenderScaleSharp=true\nvulkanRenderFilter='linear'\n")).unwrap();
-        let dimensions=config.render_dimensions_for_output(960,720).unwrap();
-        assert_eq!((dimensions.width,dimensions.height),(960*percent/100,720*percent/100));
-        assert_eq!((dimensions.output_width,dimensions.output_height),(960,720));
+        let dimensions = config.render_dimensions_for_output(960, 720).unwrap();
+        assert_eq!(
+            (dimensions.width, dimensions.height),
+            (960 * percent / 100, 720 * percent / 100)
+        );
+        assert_eq!(
+            (dimensions.output_width, dimensions.output_height),
+            (960, 720)
+        );
         assert!(!dimensions.sharp);
-        assert!(config.get_bool("gpu.renderScaleSharp",false));
-        assert!(config.set_string("gpu.graphicsApi","gles"));
-        assert!(config.render_dimensions_for_output(960,720).unwrap().sharp);
+        assert!(config.get_bool("gpu.renderScaleSharp", false));
+        assert!(config.set_string("gpu.graphicsApi", "gles"));
+        assert!(config.render_dimensions_for_output(960, 720).unwrap().sharp);
     }
-    for filter in ["'sharp'","true","12"] {
-        let config=HostConfig::parse(&format!("[gpu]\ngraphicsApi='vulkan'\nvulkanRenderFilter={filter}")).unwrap();
-        assert!(config.render_dimensions().unwrap_err().contains("vulkanRenderFilter"));
+    for filter in ["'sharp'", "true", "12"] {
+        let config = HostConfig::parse(&format!(
+            "[gpu]\ngraphicsApi='vulkan'\nvulkanRenderFilter={filter}"
+        ))
+        .unwrap();
+        assert!(config
+            .render_dimensions()
+            .unwrap_err()
+            .contains("vulkanRenderFilter"));
     }
-    let exact=HostConfig::parse("[gpu]\ngraphicsApi='vulkan'\nrenderWidth=640\nrenderHeight=480\nrenderScalePercent=75").unwrap();
-    let dimensions=exact.render_dimensions_for_output(960,720).unwrap();
-    assert_eq!((dimensions.width,dimensions.height),(640,480));
+    let exact = HostConfig::parse(
+        "[gpu]\ngraphicsApi='vulkan'\nrenderWidth=640\nrenderHeight=480\nrenderScalePercent=75",
+    )
+    .unwrap();
+    let dimensions = exact.render_dimensions_for_output(960, 720).unwrap();
+    assert_eq!((dimensions.width, dimensions.height), (640, 480));
 }
 
 #[test]
 fn memory_modes_defaults_overrides_and_invalid_values() {
-    assert_eq!(HostConfig::parse("").unwrap().memory_policy().unwrap(), MemoryPolicy::default());
-    for mode in [MemoryMode::LowMemory, MemoryMode::Balanced, MemoryMode::Performance] {
-        let config = HostConfig::parse(&format!("[runtime]\nmemory_mode = {:?}\n", mode.as_str())).unwrap();
-        assert_eq!(config.memory_policy().unwrap(), MemoryPolicy::for_mode(mode));
+    assert_eq!(
+        HostConfig::parse("").unwrap().memory_policy().unwrap(),
+        MemoryPolicy::default()
+    );
+    for mode in [
+        MemoryMode::LowMemory,
+        MemoryMode::Balanced,
+        MemoryMode::Performance,
+    ] {
+        let config =
+            HostConfig::parse(&format!("[runtime]\nmemory_mode = {:?}\n", mode.as_str())).unwrap();
+        assert_eq!(
+            config.memory_policy().unwrap(),
+            MemoryPolicy::for_mode(mode)
+        );
     }
     let config = HostConfig::parse("[runtime]\nmemory_mode = 'performance'\nstream_buffer_bytes = 16384\nstream_buffer_budget_mib = 2\npreload_audio = false\n").unwrap();
     let policy = config.memory_policy().unwrap();
-    assert_eq!((policy.stream_buffer_bytes, policy.stream_buffer_budget_mib, policy.preload_audio), (16384, 2, false));
-    for text in ["memory_mode = 'fast'", "memory_mode = true", "stream_buffer_bytes = -1", "stream_buffer_bytes = 1048577", "stream_buffer_budget_mib = 1025", "stream_buffer_budget_mib = 2.0", "preload_audio = 'false'"] {
-        assert!(HostConfig::parse(&format!("[runtime]\n{text}\n")).unwrap().memory_policy().is_err(), "{text}");
+    assert_eq!(
+        (
+            policy.stream_buffer_bytes,
+            policy.stream_buffer_budget_mib,
+            policy.preload_audio
+        ),
+        (16384, 2, false)
+    );
+    for text in [
+        "memory_mode = 'fast'",
+        "memory_mode = true",
+        "stream_buffer_bytes = -1",
+        "stream_buffer_bytes = 1048577",
+        "stream_buffer_budget_mib = 1025",
+        "stream_buffer_budget_mib = 2.0",
+        "preload_audio = 'false'",
+    ] {
+        assert!(
+            HostConfig::parse(&format!("[runtime]\n{text}\n"))
+                .unwrap()
+                .memory_policy()
+                .is_err(),
+            "{text}"
+        );
     }
 }
 
@@ -54,19 +101,13 @@ fn silksong_config_path() -> String {
 fn parses_in_repo_sample_config() {
     let config = HostConfig::from_path(sample_config_path()).unwrap();
     let paths = config.paths();
-    assert_eq!(
-        paths.game_files.as_deref(),
-        Some("../gamefiles/unitytest/")
-    );
+    assert_eq!(paths.game_files.as_deref(), Some("../gamefiles/unitytest/"));
     assert_eq!(
         paths.support_files.as_deref(),
         Some("../gamefiles/support_files/")
     );
     assert_eq!(paths.android_obb_dirs, ["/fakepath_obb"]);
-    assert_eq!(
-        paths.android_source_dirs,
-        ["/fakepath_source"]
-    );
+    assert_eq!(paths.android_source_dirs, ["/fakepath_source"]);
     assert_eq!(
         config.package().package_name.as_deref(),
         Some("com.example.package")
@@ -74,7 +115,7 @@ fn parses_in_repo_sample_config() {
     assert_eq!(config.device().display_width, 640);
     assert_eq!(config.device().display_height, 480);
     // No [plugins] section in the sample: no allowlist.
-    assert_eq!(config.enabled_plugins(), None);
+    assert_eq!(config.enabled_plugins(), Ok(None));
 }
 
 #[test]
@@ -124,6 +165,25 @@ anything = { nested = 7 }
 }
 
 #[test]
+fn guest_preload_is_a_typed_ordered_path_list() {
+    let config = HostConfig::parse(
+        r#"
+[paths]
+game_files = "game/"
+guest_preload = [
+  "lib/arm64-v8a/libanort.so",
+  "lib/arm64-v8a/libu8t.so",
+]
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        config.paths().guest_preload,
+        ["lib/arm64-v8a/libanort.so", "lib/arm64-v8a/libu8t.so",]
+    );
+}
+
+#[test]
 fn enabled_plugins_allowlist_is_exposed() {
     let config = HostConfig::parse(
         r#"
@@ -134,12 +194,25 @@ enabled = ["log_stderr", "android_base", "unity_6"]
     .unwrap();
     assert_eq!(
         config.enabled_plugins(),
-        Some(vec![
+        Ok(Some(vec![
             "log_stderr".to_owned(),
             "android_base".to_owned(),
             "unity_6".to_owned()
-        ])
+        ]))
     );
+    for malformed in [
+        "plugins = 'bad'\n",
+        "[plugins]\nenabled = 'android_base'\n",
+        "[plugins]\nenabled = ['android_base', 123]\n",
+    ] {
+        let bad = HostConfig::parse(malformed).unwrap();
+        assert!(bad.enabled_plugins().is_err(), "expected error for {malformed}");
+    }
+    let bad_vk = HostConfig::parse(
+        "[gpu]\ngraphicsApi = 'vulkan'\npresentationBackend = 'wayland_native'\nrenderWidth = 640\nrenderHeight = 480\nrenderScaleSharp = false\n",
+    )
+    .unwrap();
+    assert!(bad_vk.render_dimensions_for_output(960, 720).is_err());
 }
 
 #[test]
@@ -154,10 +227,7 @@ fn dotted_getters_use_reference_defaults() {
     assert!(config.get_bool("device.displayWidth", true));
     assert!(config.get_bool("device.displayWidth", false));
     assert_eq!(config.array_size("paths.android_obb_dirs"), 0);
-    assert_eq!(
-        config.get_string("nope.nope", "fallback"),
-        None
-    );
+    assert_eq!(config.get_string("nope.nope", "fallback"), None);
 }
 
 #[test]
@@ -169,8 +239,7 @@ fn device_defaults_match_reference() {
 #[test]
 fn set_string_overwrites_existing_leaf_only() {
     let mut config =
-        HostConfig::parse("[device]\ndisplayWidth = 1\n[paths]\ngame_files = \"a/\"\n")
-            .unwrap();
+        HostConfig::parse("[device]\ndisplayWidth = 1\n[paths]\ngame_files = \"a/\"\n").unwrap();
     assert!(config.set_string("device.displayWidth", "not-an-int"));
     // Overwrote the leaf; reparse shows a string now.
     assert_eq!(
@@ -395,9 +464,12 @@ fn dotted_key_edges_match_the_reference_walk() {
         config.get_string("il2cpp_patch.0.class.", ""),
         Some("PlayerState".to_owned())
     );
-    let sample = HostConfig::parse("[unity]
+    let sample = HostConfig::parse(
+        "[unity]
 render_sleep_us = 8000
-").unwrap();
+",
+    )
+    .unwrap();
     assert_eq!(sample.get_i64("unity.render_sleep_us.", 0), 8000);
     // Only one trailing dot ends the walk; `a..` still asks for "".
     assert_eq!(sample.get_i64("unity.render_sleep_us..", 0), 0);
@@ -416,14 +488,20 @@ fn device_reads_use_tomlpp_int32_conversions() {
     .unwrap();
     assert_eq!(
         config.device(),
-        Device { display_width: 1280, display_height: 720, display_rotation: 1 }
+        Device {
+            display_width: 1280,
+            display_height: 720,
+            display_rotation: 1
+        }
     );
     let rejected = HostConfig::parse(
         "[device]\ndisplayWidth = 1280.5\ndisplayHeight = 4294967296\ndisplayRotation = \"90\"\n",
     )
     .unwrap();
     assert_eq!(rejected.device(), Device::default());
-    let edge = HostConfig::parse("[device]\ndisplayWidth = 2147483647\ndisplayHeight = -2147483649\n").unwrap();
+    let edge =
+        HostConfig::parse("[device]\ndisplayWidth = 2147483647\ndisplayHeight = -2147483649\n")
+            .unwrap();
     assert_eq!(edge.device().display_width, 2147483647);
     assert_eq!(edge.device().display_height, 480);
 }
@@ -448,11 +526,24 @@ fn set_string_rejects_array_segments_and_leaves_no_side_effects() {
 #[test]
 fn render_policy_rejects_malformed_types_and_resolves_independent_sizes() {
     let config=HostConfig::parse("[device]\ndisplayWidth=960\ndisplayHeight=720\n[gpu]\nrenderScalePercent=75\nrenderScaleSharp=true\n").unwrap();
-    let size=config.render_dimensions().unwrap();
-    assert_eq!((size.output_width,size.output_height,size.width,size.height),(960,720,720,540));
-    for policy in ["renderScalePercent='75'","renderWidth=512","renderScalePercent=80","renderScaleSharp='yes'"] {
-        let config=HostConfig::parse(&format!("[gpu]\n{policy}\n")).unwrap();
-        assert!(config.render_dimensions().is_err(),"{policy}");
+    let size = config.render_dimensions().unwrap();
+    assert_eq!(
+        (
+            size.output_width,
+            size.output_height,
+            size.width,
+            size.height
+        ),
+        (960, 720, 720, 540)
+    );
+    for policy in [
+        "renderScalePercent='75'",
+        "renderWidth=512",
+        "renderScalePercent=80",
+        "renderScaleSharp='yes'",
+    ] {
+        let config = HostConfig::parse(&format!("[gpu]\n{policy}\n")).unwrap();
+        assert!(config.render_dimensions().is_err(), "{policy}");
     }
 }
 
@@ -460,7 +551,15 @@ fn render_policy_rejects_malformed_types_and_resolves_independent_sizes() {
 fn measured_fullscreen_output_preserves_explicit_low_resolution_rendering() {
     let config = HostConfig::parse("[device]\ndisplayWidth=640\ndisplayHeight=480\n[gpu]\nrenderWidth=640\nrenderHeight=480\nrenderScalePercent=100\n").unwrap();
     let size = config.render_dimensions_for_output(960, 720).unwrap();
-    assert_eq!((size.output_width, size.output_height, size.width, size.height), (960, 720, 640, 480));
+    assert_eq!(
+        (
+            size.output_width,
+            size.output_height,
+            size.width,
+            size.height
+        ),
+        (960, 720, 640, 480)
+    );
     assert!(size.scaled());
     assert_eq!(size.point(480, 360), (320, 240));
     assert_eq!(config.device().display_width, 640);
@@ -470,7 +569,10 @@ fn measured_fullscreen_output_preserves_explicit_low_resolution_rendering() {
 #[test]
 fn measured_fullscreen_output_rebases_percentage_and_native_rendering() {
     for (percent, expected) in [(50, (480, 360)), (75, (720, 540)), (100, (960, 720))] {
-        let config = HostConfig::parse(&format!("[device]\ndisplayWidth=640\ndisplayHeight=480\n[gpu]\nrenderScalePercent={percent}\n")).unwrap();
+        let config = HostConfig::parse(&format!(
+            "[device]\ndisplayWidth=640\ndisplayHeight=480\n[gpu]\nrenderScalePercent={percent}\n"
+        ))
+        .unwrap();
         let size = config.render_dimensions_for_output(960, 720).unwrap();
         assert_eq!((size.width, size.height), expected);
     }
@@ -481,10 +583,19 @@ fn measured_fullscreen_output_rebases_percentage_and_native_rendering() {
 #[test]
 fn native_presentation_keeps_exact_guest_size_and_rejects_implicit_visual_changes() {
     use crate::PresentationBackend;
-    assert_eq!(HostConfig::parse("").unwrap().presentation_backend().unwrap(), PresentationBackend::Internal);
+    assert_eq!(
+        HostConfig::parse("")
+            .unwrap()
+            .presentation_backend()
+            .unwrap(),
+        PresentationBackend::Internal
+    );
     let base = "[device]\ndisplayWidth=960\ndisplayHeight=720\n[gpu]\npresentationBackend='wayland_native'\nrenderWidth=640\nrenderHeight=480\nrenderScaleSharp=false\n";
     let config = HostConfig::parse(base).unwrap();
-    assert_eq!(config.presentation_backend().unwrap(), PresentationBackend::WaylandNative);
+    assert_eq!(
+        config.presentation_backend().unwrap(),
+        PresentationBackend::WaylandNative
+    );
     let before = config.render_dimensions_for_output(960, 720).unwrap();
     let native = config.render_dimensions_for_output(640, 480).unwrap();
     assert_eq!((before.width, before.height), (native.width, native.height));
@@ -492,14 +603,27 @@ fn native_presentation_keeps_exact_guest_size_and_rejects_implicit_visual_change
     assert!(!native.scaled());
     assert_eq!(native.point(320, 240), (320, 240));
     assert_eq!(before.point(480, 360), (320, 240));
-    assert_eq!(config.device().display_width, 960, "configured physical request is preserved");
+    assert_eq!(
+        config.device().display_width,
+        960,
+        "configured physical request is preserved"
+    );
     for invalid in [
         base.replace("renderScaleSharp=false", "renderScaleSharp=true"),
         base.replace("renderScaleSharp=false\n", ""),
-        base.replace("renderWidth=640\nrenderHeight=480\n", "renderScalePercent=75\n"),
+        base.replace(
+            "renderWidth=640\nrenderHeight=480\n",
+            "renderScalePercent=75\n",
+        ),
         base.replace("'wayland_native'", "'other'"),
         base.replace("'wayland_native'", "true"),
     ] {
-        assert!(HostConfig::parse(&invalid).unwrap().render_dimensions().is_err(), "{invalid}");
+        assert!(
+            HostConfig::parse(&invalid)
+                .unwrap()
+                .render_dimensions()
+                .is_err(),
+            "{invalid}"
+        );
     }
 }

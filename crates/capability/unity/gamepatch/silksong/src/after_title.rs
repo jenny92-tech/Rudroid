@@ -4,7 +4,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use rudroid_common::host_api::HostApiV0;
-use rudroid_common::il2cpp::{Il2cpp, Method, TYPE_BOOLEAN, TYPE_STRING, TYPE_VOID};
+use rudroid_unity_common::il2cpp::{Il2cpp, Method, TYPE_BOOLEAN, TYPE_STRING, TYPE_VOID};
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -157,12 +157,7 @@ thread_local! {
     static BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
-struct BusyGuard;
-impl Drop for BusyGuard {
-    fn drop(&mut self) {
-        BUSY.with(|busy| busy.set(false));
-    }
-}
+use rudroid_unity_common::gamepatch_support::ReentryGuard;
 
 pub(super) struct Runtime {
     host: HostApiV0,
@@ -206,10 +201,10 @@ impl Runtime {
     }
 
     pub(super) fn stop(&self, identity: usize) {
+        self.stopped.store(true, Ordering::Release);
         if !self.player_thread() {
             return;
         }
-        self.stopped.store(true, Ordering::Release);
         *super::lock(&self.binding) = None;
         SLOT.with(|slot| {
             // A reentrant stop must not borrow the active engine. The frame
@@ -231,10 +226,8 @@ impl Runtime {
         let Some(api) = *super::lock(&self.binding) else {
             return;
         };
-        if !self.player_thread() || BUSY.with(|busy| busy.replace(true)) {
-            return;
-        }
-        let _busy = BusyGuard;
+        if !self.player_thread() { return; }
+        let Some(_guard) = ReentryGuard::enter(&BUSY) else { return; };
         // Release both locks and the RefCell borrow before invoking Unity.
         // An unwinding/reentrant path sees Finished, never a fresh attempt.
         let previous = SLOT.with(|slot| slot.replace(Some((identity, Slot::Finished))));
@@ -285,6 +278,9 @@ impl Runtime {
         }
         if self.stopped.load(Ordering::Acquire) {
             slot = Slot::Finished;
+        }
+        if matches!(slot, Slot::Finished) {
+            self.stopped.store(true, Ordering::Release);
         }
         SLOT.with(|cell| {
             cell.replace(Some((identity, slot)));

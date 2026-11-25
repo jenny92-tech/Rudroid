@@ -9,7 +9,7 @@ into the shared target's cdylibs without changing the kit id, so a deploy
 from that dir would otherwise be accepted. Members exporting any of these
 symbols are refused. LLVM PGO training images additionally export their
 collector; optimized feedback images do not. Keep the list identical to `TEST_BUILD_MARKERS` in
-`project/unity_loader/src/lib.rs` (test_deploy_select.py checks it).
+`host/src/lib.rs` (test_deploy_select.py checks it).
 
 Only real exports count: ELF files are checked through their `.dynsym`
 defined symbols, so the same name in rodata (the loader binary carries the
@@ -27,8 +27,11 @@ TEST_BUILD_MARKERS = (
     "rudroid_elf_image_chain_reset",
     "rudroid_pgo_training_flush",
     "rudroid_debug_build_marker",
+    "rudroid_sdl_diag_probes_marker",
+    "rudroid_unity_diag_probes_marker",
 )
 
+SHT_STRTAB = 3
 SHT_DYNSYM = 11
 MACHO_MAGICS = (
     b"\xcf\xfa\xed\xfe",
@@ -40,7 +43,7 @@ MACHO_MAGICS = (
 
 
 def _elf_exports(data: bytes) -> set[str]:
-    """Names of the defined symbols in every SHT_DYNSYM section; a
+    """Names of the defined non-local symbols in every SHT_DYNSYM section; a
     truncated or malformed header yields the names read so far."""
     names: set[str] = set()
     wide = data[4] == 2
@@ -66,6 +69,8 @@ def _elf_exports(data: bytes) -> set[str]:
         sh_type, sh_offset, sh_size, sh_link = header[1], header[4], header[5], header[6]
         if sh_type != SHT_DYNSYM or sh_link >= len(sections):
             continue
+        if sections[sh_link][1] != SHT_STRTAB:
+            continue
         str_offset, str_size = sections[sh_link][4], sections[sh_link][5]
         strtab = data[str_offset:str_offset + str_size]
         for offset in range(sh_offset, sh_offset + sh_size - sym_size + 1, sym_size):
@@ -74,8 +79,10 @@ def _elf_exports(data: bytes) -> set[str]:
             except struct.error:
                 break
             st_name = fields[0]
+            st_info = fields[1] if wide else fields[3]
             st_shndx = fields[3] if wide else fields[5]
-            if st_shndx == 0 or st_name >= len(strtab):
+            # Ignore undefined imports and STB_LOCAL symbols.
+            if st_shndx == 0 or (st_info >> 4) == 0 or st_name >= len(strtab):
                 continue
             end = strtab.find(b"\0", st_name)
             if end < 0:
@@ -100,13 +107,22 @@ def test_build_marker(path: Path) -> str | None:
 
 def production_build_issue(path: Path) -> str | None:
     """Reject diagnostics and old kit images without positive Release evidence."""
-    issue = test_build_marker(path)
-    if issue:
-        return issue
     data = path.read_bytes()
     release = "rudroid_release_build_marker"
     if data[:4] == b"\x7fELF":
-        return None if len(data) > 5 and release in _elf_exports(data) else "missing " + release
+        if len(data) <= 5:
+            return "missing " + release
+        exports = _elf_exports(data)
+        issue = next((m for m in TEST_BUILD_MARKERS if m in exports), None)
+        if issue:
+            return issue
+        return None if release in exports else "missing " + release
     if data[:4] in MACHO_MAGICS:
+        issue = next(
+            (m for m in TEST_BUILD_MARKERS if b"\0_" + m.encode("ascii") + b"\0" in data),
+            None,
+        )
+        if issue:
+            return issue
         return None if b"\0_" + release.encode() + b"\0" in data else "missing " + release
     return "not an ELF/Mach-O production artifact"

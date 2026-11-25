@@ -8,6 +8,7 @@
 from collections import Counter
 import hashlib
 import json
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -22,6 +23,43 @@ else:
     from unity_astc.profiles import DEFAULT_TARGET, TARGETS
 
 REPORT = ".rudroid-resources.json"
+
+
+def _publish_directory(staging, output):
+    """Publish a complete tree without replacing a concurrent creator's output.
+
+    A preceding exists() check cannot protect POSIX rename: an empty directory
+    created in that gap would be silently replaced. Use the filesystem's atomic
+    exclusive rename, with no check-then-rename fallback on unsupported hosts.
+    """
+    if os.name == "nt":
+        # Windows rename already refuses an existing destination.
+        os.rename(staging, output)
+        return
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    source, destination = os.fsencode(staging), os.fsencode(output)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, "exclusive directory publication is unavailable")
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source, destination, 0x4)  # RENAME_EXCL (Darwin sys/stdio.h)
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise OSError(errno.ENOTSUP, "exclusive directory publication is unavailable")
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(-100, source, -100, destination, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise OSError(errno.ENOTSUP, "exclusive directory publication is unavailable")
+    if result:
+        error = ctypes.get_errno()
+        if error in (errno.EEXIST, errno.ENOTEMPTY):
+            raise ValueError("output appeared during preparation; existing data was preserved")
+        raise OSError(error, os.strerror(error), os.fspath(output))
 
 
 def fingerprint(path):
@@ -74,23 +112,58 @@ def _is_bundle(path):
         return handle.read(8) == b"UnityFS\0"
 
 
-def _run_bundle(source, output, target):
-    command = [sys.executable, str(Path(__file__).resolve()), "--_bundle", str(source), str(output), target]
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+def _run_worker(source, arguments, payload=None):
+    command = [sys.executable, str(Path(__file__).resolve()), *arguments]
+    data = json.dumps(payload) if payload is not None else None
+    with subprocess.Popen(command, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
         try:
             while True:
                 try:
-                    stdout, stderr = process.communicate(timeout=30)
+                    stdout, stderr = process.communicate(input=data, timeout=30)
                     break
                 except subprocess.TimeoutExpired:
+                    data = None  # Retry an in-progress communicate, never resend stdin.
                     print(f"  processing {source.name}...", flush=True)
         except BaseException:
             process.terminate()
             process.communicate()
             raise
         if process.returncode:
-            raise ValueError(f"{source.name}: conversion failed\n{stderr[-4000:]}")
+            raise ValueError(f"{source.name}: resource worker failed\n{stderr[-4000:]}")
     return json.loads(stdout)
+
+
+def _scan_font_bundle(source):
+    return _run_worker(source, ['--_font_refs', str(source)])
+
+
+def _run_bundle(source, output, target, protected_fonts=()):
+    return _run_worker(source, ['--_bundle', str(source), str(output), target], list(protected_fonts))
+
+
+def _font_closure(source, bundles):
+    # A font and its atlas may live in different bundles. Index only stable
+    # metadata in short-lived workers; keeping UnityPy environments in this
+    # parent would defeat the one-bundle memory bound. Material edges are not
+    # roots, so ordinary material textures remain eligible for optimization.
+    roots, materials = set(), {}
+    for relative in sorted(bundles):
+        metadata = _scan_font_bundle(source / relative)
+        roots.update(tuple(key) for key in metadata['roots'])
+        for material in metadata['materials']:
+            key = material['owner'], material['path_id']
+            textures = {tuple(key) for key in material['textures']}
+            if key in materials and materials[key] != textures:
+                raise ValueError(f"ambiguous cross-bundle font material owner: {key}")
+            materials[key] = textures
+    protected, pending = set(roots), list(roots)
+    while pending:
+        for texture in materials.get(pending.pop(), ()):
+            if texture not in protected:
+                protected.add(texture)
+                pending.append(texture)
+    return sorted(protected)
 
 
 def prepare(source, output, target=DEFAULT_TARGET):
@@ -114,6 +187,7 @@ def prepare(source, output, target=DEFAULT_TARGET):
     bundles = {rel for rel, state in files.items() if state is not None and _is_bundle(source / rel)}
     if not bundles:
         raise ValueError("no UnityFS resources found in the input directory")
+    protected_fonts = _font_closure(source, bundles)
     output.parent.mkdir(parents=True, exist_ok=True)
     summary = {"schema_version": 1, "target": target, "files": sum(state is not None for state in files.values()), "bundles": len(bundles),
                "changed_bundles": 0, "textures": 0, "changed_textures": 0,
@@ -132,7 +206,7 @@ def prepare(source, output, target=DEFAULT_TARGET):
             destination.parent.mkdir(parents=True, exist_ok=True)
             if rel in bundles:
                 done += 1
-                result = _run_bundle(original, destination, target)
+                result = _run_bundle(original, destination, target, protected_fonts)
                 summary["textures"] += result["textures"]
                 summary["changed_textures"] += result["changed"]
                 summary["changed_bundles"] += bool(result["changed"])
@@ -153,15 +227,22 @@ def prepare(source, output, target=DEFAULT_TARGET):
         summary["seconds"] = round(time.monotonic() - start, 2)
         summary["scope"] = "offline resources; texture payload totals are not live RAM or gameplay acceptance"
         atomic_json(staging / REPORT, summary)
-        if output.exists() or output.is_symlink():
-            raise ValueError("output appeared during preparation; existing data was preserved")
-        staging.rename(output)
+        _publish_directory(staging, output)
     print(f"Ready: {output}; {summary['changed_textures']} textures prepared", flush=True)
     return summary
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == '--_font_refs':
+        if len(argv) != 2:
+            raise ValueError('invalid internal font scanner arguments')
+        if __package__:
+            from .unity_astc.astc_retier import scan_font_references
+        else:
+            from unity_astc.astc_retier import scan_font_references
+        print(json.dumps(scan_font_references(Path(argv[1]))))
+        return
     if argv and argv[0] == "--_bundle":
         # Internal short-lived worker bounds memory to one bundle, without a second public CLI.
         if len(argv) != 4:
@@ -170,7 +251,8 @@ def main(argv=None):
             from .unity_astc.astc_retier import prepare_bundle
         else:
             from unity_astc.astc_retier import prepare_bundle
-        print(json.dumps(prepare_bundle(Path(argv[1]), Path(argv[2]), argv[3])))
+        protected_fonts = json.loads(sys.stdin.read() or '[]')
+        print(json.dumps(prepare_bundle(Path(argv[1]), Path(argv[2]), argv[3], protected_fonts)))
         return
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)

@@ -3,11 +3,67 @@
 //! POS:    optional native graphics boundary; GLES, audio and input keep their existing owners
 use ash::vk;
 use rudroid_common::display_dimensions::RenderDimensions;
-use std::{ffi::{c_char, c_void, CStr}, sync::{Arc, Mutex, OnceLock, Weak,
+use std::{ffi::{c_char, CStr, CString}, sync::{Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering}}};
 
-const LAYER: &CStr = c"VK_LAYER_RUDROID_wayland";
+const DEFAULT_WSI_LAYER: &CStr = c"VK_LAYER_RUDROID_wayland";
 static ACTIVE: Mutex<Weak<Graphics>> = Mutex::new(Weak::new());
+
+struct WsiConfig {
+    /// Explicit private WSI layer when `RUDROID_VULKAN_WSI_LIBRARY` is supplied.
+    /// `None` selects native ICD Wayland WSI (e.g., Mesa Panfrost/Turnip/RADV).
+    layer_name: Option<CString>,
+    _library: Option<libloading::Library>,
+}
+
+impl WsiConfig {
+    fn layer(&self) -> Option<&CStr> {
+        self.layer_name.as_deref()
+    }
+}
+
+fn wsi_config() -> Result<&'static WsiConfig, String> {
+    static WSI: OnceLock<Result<WsiConfig, String>> = OnceLock::new();
+    WSI.get_or_init(|| {
+        let Some(path) = std::env::var_os("RUDROID_VULKAN_WSI_LIBRARY").filter(|v| !v.is_empty()) else {
+            // Native Wayland ICD mode: no external WSI layer injected; preflight
+            // verifies the Vulkan loader/ICD exposes VK_KHR_wayland_surface directly.
+            return Ok(WsiConfig { layer_name: None, _library: None });
+        };
+        let path = std::path::Path::new(&path);
+        let valid_so = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".so") || n.contains(".so."));
+        if !path.is_absolute() || !valid_so {
+            return Err("RUDROID_VULKAN_WSI_LIBRARY must name an absolute shared library path".into());
+        }
+        let layer_name = match std::env::var("RUDROID_VULKAN_WSI_LAYER") {
+            Ok(name) if !name.is_empty() => {
+                CString::new(name).map_err(|_| "RUDROID_VULKAN_WSI_LAYER contains NUL")?
+            }
+            _ => DEFAULT_WSI_LAYER.to_owned(),
+        };
+        if layer_name.as_c_str() == DEFAULT_WSI_LAYER
+            && std::env::var("DISABLE_WSI_LAYER").as_deref() != Ok("1")
+        {
+            return Err(
+                "Vulkan Arm WSI layer requires DISABLE_WSI_LAYER=1 in the launcher environment to disable the firmware implicit WSI"
+                    .into(),
+            );
+        }
+        // SAFETY: the trusted launcher supplies the audited native dependency.
+        // Pinning it separately preserves every returned layer function pointer
+        // across temporary-instance destruction and the loader's dlclose calls.
+        let library = unsafe { libloading::Library::new(path) }.map_err(|e| e.to_string())?;
+        Ok(WsiConfig {
+            layer_name: Some(layer_name),
+            _library: Some(library),
+        })
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NativeWindow { display: usize, surface: usize }
@@ -15,18 +71,7 @@ pub(crate) struct Observed { pub version: String, pub renderer: String, pub vend
     pub major: u32, pub minor: u32 }
 
 fn entry() -> Result<&'static ash::Entry, String> {
-    static WSI: OnceLock<Result<libloading::Library, String>> = OnceLock::new();
-    WSI.get_or_init(|| {
-        let path = std::env::var_os("RUDROID_VULKAN_WSI_LIBRARY").ok_or("candidate WSI library path is absent")?;
-        let path = std::path::Path::new(&path);
-        if !path.is_absolute() || path.file_name().is_none_or(|name|name != "libVkLayer_window_system_integration.so") {
-            return Err("candidate WSI path must name the absolute audited layer library".into());
-        }
-        // SAFETY: the trusted launcher supplies the audited native dependency.
-        // Pinning it separately preserves every returned layer function pointer
-        // across temporary-instance destruction and the loader's dlclose calls.
-        unsafe { libloading::Library::new(path) }.map_err(|e|e.to_string())
-    }).as_ref().map_err(Clone::clone)?;
+    let _ = wsi_config()?;
     static ENTRY: OnceLock<Result<ash::Entry, String>> = OnceLock::new();
     ENTRY.get_or_init(|| {
         // SAFETY: trusted native system loader with the Vulkan C ABI. The
@@ -40,15 +85,20 @@ fn entry() -> Result<&'static ash::Entry, String> {
 /// only an explicitly selected Vulkan session needs this optional entry.
 pub(crate) fn pixel_extent(window: &sdl2::video::Window) -> Result<(i32, i32), String> {
     type GetSize = unsafe extern "C" fn(*mut sdl2::sys::SDL_Window, *mut i32, *mut i32);
-    static QUERY: OnceLock<Result<(libloading::Library, GetSize), String>> = OnceLock::new();
+    static QUERY: OnceLock<Result<(Option<libloading::Library>, GetSize), String>> = OnceLock::new();
     let (_, query) = QUERY.get_or_init(|| {
-        // SAFETY: trusted system SDL2 C ABI. Pin the library for the copied
-        // function's lifetime; this lookup runs only for Vulkan, never GLES.
+        // SAFETY: trusted system SDL2 C ABI. Prefer the already-linked process
+        // image (dlopen(NULL)) so non-standard SONAMEs work; fall back to
+        // libSDL2-2.0.so.0 and pin it for the copied function's lifetime.
         unsafe {
+            let current = libloading::os::unix::Library::this();
+            if let Ok(symbol) = current.get::<GetSize>(b"SDL_GetWindowSizeInPixels\0") {
+                return Ok((None, *symbol));
+            }
             let library = libloading::Library::new("libSDL2-2.0.so.0").map_err(|e| e.to_string())?;
             let query = *library.get::<GetSize>(b"SDL_GetWindowSizeInPixels\0")
                 .map_err(|_| "Vulkan pixel extent requires SDL 2.26 or later".to_owned())?;
-            Ok((library, query))
+            Ok((Some(library), query))
         }
     }).as_ref().map_err(Clone::clone)?;
     let (mut width, mut height) = (0, 0);
@@ -80,23 +130,21 @@ impl NativeWindow {
     }
 
     pub(crate) fn inspect(window: &sdl2::video::Window) -> Result<(Self, Observed), String> {
-        if std::env::var("DISABLE_WSI_LAYER").as_deref() != Ok("1") {
-            return Err("Vulkan candidate requires the firmware implicit WSI disabled in its launcher environment".into());
-        }
         let native = Self::from_window(window)?;
+        let wsi = wsi_config()?;
         let entry = entry()?;
         // SAFETY: query with no native handles; every returned record is owned.
-        let extensions = unsafe { entry.enumerate_instance_extension_properties(Some(LAYER)) }
-            .map_err(|e| format!("private Vulkan WSI layer unavailable: {e:?}"))?;
+        let extensions = unsafe { entry.enumerate_instance_extension_properties(wsi.layer()) }
+            .map_err(|e| format!("Vulkan Wayland WSI extensions unavailable: {e:?}"))?;
         if !extensions.iter().any(|e| e.extension_name_as_c_str().ok() == Some(ash::khr::wayland_surface::NAME)) {
-            return Err("private Vulkan layer has no Wayland surface extension".into());
+            return Err("Vulkan WSI/ICD has no VK_KHR_wayland_surface extension".into());
         }
         let names = [ash::khr::surface::NAME.as_ptr(), ash::khr::wayland_surface::NAME.as_ptr()];
-        let layers = [LAYER.as_ptr()];
+        let layers_storage: Vec<*const c_char> = wsi.layer().into_iter().map(CStr::as_ptr).collect();
         let app = vk::ApplicationInfo::default().application_name(c"Rudroid preflight")
             .api_version(vk::API_VERSION_1_1);
         let info = vk::InstanceCreateInfo::default().application_info(&app)
-            .enabled_extension_names(&names).enabled_layer_names(&layers);
+            .enabled_extension_names(&names).enabled_layer_names(&layers_storage);
         // SAFETY: initialized borrowed arrays remain alive for the synchronous
         // call; this temporary native instance is retired below on every exit.
         let instance = unsafe { entry.create_instance(&info, None) }.map_err(|e| format!("Vulkan preflight instance: {e:?}"))?;
@@ -137,7 +185,11 @@ impl NativeWindow {
     }
 }
 
-struct Instance { native: ash::Instance, android_surface: bool }
+struct Instance {
+    native: ash::Instance,
+    android_surface: bool,
+    create_wayland_surface: Option<vk::PFN_vkCreateWaylandSurfaceKHR>,
+}
 struct Device { native: ash::Device, present: Option<vk::PFN_vkQueuePresentKHR> }
 #[derive(Default)]
 struct State { instance: Option<Arc<Instance>>, device: Option<Arc<Device>>, creating_instance: bool, creating_device: bool }
@@ -257,14 +309,10 @@ unsafe extern "system" fn get_device_proc(device: vk::Device, name: *const c_cha
 /// Borrowed known graphics source, before the guest loader resolves Vulkan imports.
 pub(crate) fn resolve(name: &CStr) -> usize {
     let Some(g) = active() else { return 0; };
+    if name.to_bytes().starts_with(b"ANativeWindow_") {
+        return super::native_window::resolve::<Graphics>(name.to_bytes());
+    }
     match name.to_bytes() {
-        b"ANativeWindow_fromSurface" => from_surface as usize,
-        b"ANativeWindow_acquire" => acquire as usize,
-        b"ANativeWindow_release" => release as usize,
-        b"ANativeWindow_getWidth" => width as usize,
-        b"ANativeWindow_getHeight" => height as usize,
-        b"ANativeWindow_getFormat" => format as usize,
-        b"ANativeWindow_setBuffersGeometry" => geometry as usize,
         b"vkGetInstanceProcAddr" => get_instance_proc as usize,
         b"vkGetDeviceProcAddr" => get_device_proc as usize,
         b"vkCreateInstance" => create_instance as usize,
@@ -308,9 +356,11 @@ unsafe extern "system" fn instance_extensions(layer: *const c_char, count: *mut 
     unsafe {
         if !layer.is_null() { return (g.entry.fp_v1_0().enumerate_instance_extension_properties)(layer, count, output); }
         let mut extensions = match g.entry.enumerate_instance_extension_properties(None) { Ok(v) => v, Err(e) => return e };
-        let extra = match g.entry.enumerate_instance_extension_properties(Some(LAYER)) { Ok(v) => v, Err(e) => return e };
-        for extension in extra {
-            if !extensions.iter().any(|e| e.extension_name == extension.extension_name) { extensions.push(extension); }
+        if let Some(layer_name) = wsi_config().ok().and_then(WsiConfig::layer) {
+            let extra = match g.entry.enumerate_instance_extension_properties(Some(layer_name)) { Ok(v) => v, Err(e) => return e };
+            for extension in extra {
+                if !extensions.iter().any(|e| e.extension_name == extension.extension_name) { extensions.push(extension); }
+            }
         }
         extensions.retain(|e| e.extension_name_as_c_str().ok() != Some(ash::khr::wayland_surface::NAME));
         let mut android = vk::ExtensionProperties::default();
@@ -355,14 +405,27 @@ unsafe extern "system" fn create_instance(info: *const vk::InstanceCreateInfo<'_
             if name.is_null() { return vk::Result::ERROR_LAYER_NOT_PRESENT; }
             layers.push(name);
         }
-        if !layers.iter().any(|p| CStr::from_ptr(*p) == LAYER) { layers.push(LAYER.as_ptr()); }
+        if let Some(layer_name) = wsi_config().ok().and_then(WsiConfig::layer) {
+            if !layers.iter().any(|p| CStr::from_ptr(*p) == layer_name) { layers.push(layer_name.as_ptr()); }
+        }
         let mut adjusted = *original;
         adjusted.enabled_extension_count = extensions.len() as u32; adjusted.pp_enabled_extension_names = extensions.as_ptr();
         adjusted.enabled_layer_count = layers.len() as u32; adjusted.pp_enabled_layer_names = layers.as_ptr();
         let result = (g.entry.fp_v1_0().create_instance)(&adjusted, allocator, output);
         if result == vk::Result::SUCCESS {
             let native = ash::Instance::load(g.entry.static_fn(), *output);
-            g.state.lock().unwrap_or_else(|p|p.into_inner()).instance = Some(Arc::new(Instance { native, android_surface: android }));
+            let raw_surface = (g.entry.static_fn().get_instance_proc_addr)(
+                *output,
+                c"vkCreateWaylandSurfaceKHR".as_ptr(),
+            );
+            let create_wayland_surface = raw_surface.map(|f| {
+                std::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkCreateWaylandSurfaceKHR>(f)
+            });
+            g.state.lock().unwrap_or_else(|p|p.into_inner()).instance = Some(Arc::new(Instance {
+                native,
+                android_surface: android,
+                create_wayland_surface,
+            }));
             rudroid_common::diagnostic!("[VULKAN] guest instance created; Android surface translated={android}");
         }
         result
@@ -372,10 +435,14 @@ unsafe extern "system" fn create_instance(info: *const vk::InstanceCreateInfo<'_
 /// Caller has stopped all users, destroyed child objects and lends compatible allocator callbacks.
 unsafe extern "system" fn destroy_instance(instance: vk::Instance, allocator: *const vk::AllocationCallbacks<'_>) {
     let Some(g) = active() else { return; };
-    let Some(own) = g.instance().filter(|i|i.native.handle() == instance) else { return; };
+    let own = {
+        let mut state = g.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.instance.as_ref().is_none_or(|item| item.native.handle() != instance) { return; }
+        state.device = None;
+        state.instance.take().unwrap()
+    };
     // SAFETY: quiescent valid instance under the caller's Vulkan destroy contract.
     unsafe { (own.native.fp_v1_0().destroy_instance)(instance, allocator) };
-    g.state.lock().unwrap_or_else(|p|p.into_inner()).instance = None;
 }
 /// # Safety
 /// Physical device belongs to the live guest instance; C input chains/output/allocator
@@ -405,10 +472,13 @@ unsafe extern "system" fn create_device(physical: vk::PhysicalDevice, info: *con
 /// All device work is idle, children destroyed and allocator compatible with creation.
 unsafe extern "system" fn destroy_device(device: vk::Device, allocator: *const vk::AllocationCallbacks<'_>) {
     let Some(g) = active() else { return; };
-    let Some(own) = g.device().filter(|d|d.native.handle() == device) else { return; };
+    let own = {
+        let mut state = g.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.device.as_ref().is_none_or(|item| item.native.handle() != device) { return; }
+        state.device.take().unwrap()
+    };
     // SAFETY: exact live native device under Vulkan's destruction contract.
     unsafe { (own.native.fp_v1_0().destroy_device)(device, allocator) };
-    g.state.lock().unwrap_or_else(|p|p.into_inner()).device = None;
     rudroid_common::diagnostic!("[VULKAN] guest device destroyed; successful_presents={}", g.presents.load(Ordering::Relaxed));
 }
 /// # Safety
@@ -422,12 +492,15 @@ unsafe extern "system" fn create_android_surface(instance: vk::Instance, info: *
     // SAFETY: readable native create info, known process-owned window token and
     // SDL native resources guaranteed live by activation. No pNext is guessed.
     unsafe {
+        *output = vk::SurfaceKHR::null();
         if (*info).s_type != vk::StructureType::ANDROID_SURFACE_CREATE_INFO_KHR || !(*info).p_next.is_null()
             || (*info).window as usize != Arc::as_ptr(&g) as usize || !(*info).flags.is_empty() { return vk::Result::ERROR_SURFACE_LOST_KHR; }
+        let Some(create_wayland_surface) = own.create_wayland_surface else {
+            return vk::Result::ERROR_EXTENSION_NOT_PRESENT;
+        };
         let create = vk::WaylandSurfaceCreateInfoKHR::default()
             .display(g.native.display as *mut vk::wl_display).surface(g.native.surface as *mut vk::wl_surface);
-        let api = ash::khr::wayland_surface::Instance::new(g.entry, &own.native);
-        let result = (api.fp().create_wayland_surface_khr)(instance, &create, allocator, output);
+        let result = create_wayland_surface(instance, &create, allocator, output);
         rudroid_common::diagnostic!("[VULKAN] Android/Wayland surface: {result:?}");
         result
     }
@@ -450,31 +523,10 @@ unsafe extern "system" fn queue_present(queue: vk::Queue, info: *const vk::Prese
     result
 }
 
-/// # Safety
-/// NDK callers pair each fromSurface/acquire with one release. Opaque leases may
-/// outlive activation, but callers stop using native resources before shutdown.
-unsafe extern "C" fn from_surface(_: *mut c_void, surface: *mut c_void) -> *mut c_void {
-    if surface.is_null() { return std::ptr::null_mut(); }
-    active().map_or(std::ptr::null_mut(), |g|Arc::into_raw(g) as *mut c_void)
-}
-/// # Safety
-/// Caller owns a live lease produced by this backend, excluding its last release.
-unsafe extern "C" fn acquire(window: *mut c_void) {
-    // SAFETY: increments one caller-owned live Arc lease, not an SDL native pointer.
-    if !window.is_null() { unsafe { Arc::increment_strong_count(window.cast::<Graphics>()) }; }
-}
-/// # Safety
-/// Exactly one release for a caller-owned lease; never a token from another backend.
-unsafe extern "C" fn release(window: *mut c_void) {
-    // SAFETY: caller transfers back one Arc reference while its code stays pinned.
-    if !window.is_null() { unsafe { Arc::decrement_strong_count(window.cast::<Graphics>()) }; }
-}
-fn window_state(window: *mut c_void) -> Option<Arc<Graphics>> { active().filter(|g|Arc::as_ptr(g) as usize == window as usize) }
-extern "C" fn width(window: *mut c_void) -> i32 { window_state(window).map_or(-19, |g|g.dimensions.width) }
-extern "C" fn height(window: *mut c_void) -> i32 { window_state(window).map_or(-19, |g|g.dimensions.height) }
-extern "C" fn format(window: *mut c_void) -> i32 { window_state(window).map_or(-19, |_|1) }
-extern "C" fn geometry(window: *mut c_void, w: i32, h: i32, format: i32) -> i32 {
-    let Some(g) = window_state(window) else { return -19; };
-    if !matches!(format, 0 | 1) || !((w == 0 && h == 0) || (w == g.dimensions.width && h == g.dimensions.height)) { return -95; }
-    0
+impl super::native_window::Backend for Graphics {
+    const FORMAT: Option<i32> = Some(1); // WINDOW_FORMAT_RGBA_8888
+    const NULL_WINDOW: i32 = -19;
+    const INVALID_GEOMETRY: i32 = -95;
+    fn active() -> Option<Arc<Self>> { active() }
+    fn size(&self) -> (i32, i32) { (self.dimensions.width, self.dimensions.height) }
 }

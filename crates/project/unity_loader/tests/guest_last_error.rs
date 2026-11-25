@@ -13,6 +13,9 @@ use rudroid_common::symbols;
 use rudroid_test_support::cargo::{ensure_workspace_cdylib, lib_name};
 use rudroid_unity_loader::{guest, load_deploy_dir, Selection};
 
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
 /// Build the workspace elf_load cdylib into THIS run's target dir (shared
 /// 73/75 helper: matching profile, always rebuilt so a stale kit member is
 /// never copied into a fixture).
@@ -45,7 +48,10 @@ fn bring_up_kit(kit: &Kit) -> Result<Vec<guest::ModuleEvent>, guest::GuestError>
         kit.dir.join("gamedata").display()
     ))
     .unwrap();
-    let plan = guest::GuestPlan::from_config(&config).expect("plan");
+    let mut plan = guest::GuestPlan::from_config(&config).expect("plan");
+    if plan.entries.is_empty() {
+        unity_guest_plan::push_unity_arm64_entries(&mut plan);
+    }
     let capabilities = unsafe { load_deploy_dir(&kit.dir, &Selection::All) }.expect(
         "the kit itself must load: descriptor and build id are intact \
          without the error channel",

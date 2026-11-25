@@ -3,19 +3,37 @@
 > `android_jni_vm` is the single process authority for JNI classes, methods, objects, references, fields, arrays and native registration.
 
 ## Role
-Capability `android_jni_vm`, `Kind::Runtime`, artifact `libandroid_jni_vm.so` (cdylib + rlib), depending on `common` and `reply_catalog/format`. Its `rudroid_plugin_early_init` creates the process session and registers the `JavaVM*` in the Host API shared-VM slot (first write wins; a foreign VM fails the phase). The guest `JNI_OnLoad`, `android_base`, `reply_catalog` and Addons reach it only through that slot and the JNI tables.
+Capability `android_jni_vm`, `Kind::Runtime`, artifact `libandroid_jni_vm.so` (cdylib + rlib), depending on `common`. Its `rudroid_plugin_early_init` creates the process session and registers the `JavaVM*` in the Host API shared-VM slot (first write wins; a foreign VM fails the phase). The guest `JNI_OnLoad`, `android_base`, `reply_catalog` and Addons reach it only through that slot and the JNI tables.
 
 ## Design
 
 - `abi.rs` publishes complete JNI tables; unsupported slots report a pending
   exception. Native dispatch checks full descriptors and exact ARM64 prototypes;
-  the C adapter alone interprets normal/V varargs. Unsupported shapes reject.
+  the C adapter alone interprets normal/V varargs. Boolean input dispatch
+  includes the evidenced Unity 2022 `(Landroid/view/InputEvent;I)Z`; unsupported shapes reject.
 - `session.rs` owns process-lifetime classes, ids, objects, threads and references.
   Fields use exact declaration indexes with inherited lookup; diagnostics preserve
   pending exceptions. Assignability includes interfaces and array covariance.
+- `class_lookup.rs` separates trusted declarations from guest lookup. Without
+  a catalog, legacy lookup remains unchanged. Installing a verified catalog
+  restricts queries to its application names plus explicitly declared runtime
+  types; a miss creates no class and raises NoClassDefFoundError for JNI or
+  ClassNotFoundException for Java lookup. Array components follow the same rule.
+  Catalog validation precedes atomic first-wins publication. This is one global
+  metadata view, not DEX execution, class initialization or full ART loaders.
+  Standard exceptions actually produced by VM/framework paths are declared at
+  bootstrap with their parent chains, so a cold error-type lookup (including
+  first player input) works without first inspecting an exception object.
+  Metadata does not imply unimplemented constructors or methods are available.
 - Every native call owns a guarded local frame and promotes returned references
   before releasing nested locals. No lock spans guest code; attach/detach and
   external native-thread local cleanup remain explicit.
+- `ThrowNew` preserves the caller's requested exception class and message;
+  pending exception inspection must not collapse subclasses to Throwable.
+- Java `Class.getSuperclass` reuses JNI's registered ordinary-class parent
+  authority. The native probe independently checks Application→Context,
+  Object→null and array→Object. Missing DEX interface/primitive-kind metadata
+  remains a limitation of this bounded graph, not full reflection support.
 - All eight primitive arrays share typed storage and checked copy leases;
   COMMIT retains the copy/root, final release/ABORT retire both. Critical access
   remains subject to JNI restrictions. Strings own lazy alternate encodings and
@@ -26,6 +44,12 @@ Capability `android_jni_vm`, `Kind::Runtime`, artifact `libandroid_jni_vm.so` (c
 
 ## Constraints
 - Ordinary JNI tracing uses the shared explicit diagnostics policy. Handle exhaustion, unimplemented JNI slots, ExceptionDescribe and FatalError retain error diagnostics without enabling successful-call tracing.
+- Explicit `jni.trace_native_calls` identifies the dispatching runtime thread
+  alongside the method descriptor and actual receiver class; incompatible object
+  field assignments report declared/supplied types, never payload contents.
+  These records do not inspect arguments or guest stacks.
+  Rust ThreadId is local to that capability's runtime; correlate its own method
+  entries rather than comparing numbers printed by another independently linked DSO.
 - Reference promotion atomically retains under the source-handle lock; temporary roots protect direct-buffer copies and object/array field publication against concurrent last-global deletion.
 - Object/array collection traces an allocation-free intrusive work list under the liveness and both heap locks, expanding each reachable node once. Scratch links never escape these locks; collection timing, roots, leaf pins and rootless-cycle reclamation remain immediate.
 - Incoming graph edges are counted under the liveness/heap locks. A node with no outgoing object/array edges cannot keep other owners alive: a zero-root such node is retained by incoming edges or reclaimed directly at zero incoming edges. Rootless nodes with incoming edges and graph children require tracing; sweep releases every dead owner's incoming-edge contribution before removing any payload.
@@ -38,11 +62,12 @@ Capability `android_jni_vm`, `Kind::Runtime`, artifact `libandroid_jni_vm.so` (c
 
 | Name | Path | Responsibility |
 |------|------|----------------|
-| Manifest | `Cargo.toml` | cdylib + rlib `android_jni_vm`; `common` and `reply_catalog/format` |
+| Manifest | `Cargo.toml` | cdylib + rlib `android_jni_vm`; `common` (build: `native-build`) |
 | Build script | `build.rs` | Private archive `rudroid_jni_varargs` from `src/varargs.c` |
-| Crate root | `src/lib.rs` | Descriptor, early-init session and shared-VM registration, `Resolver` |
+| Crate root | `src/lib.rs` | Descriptor, early-init session and shared-VM registration |
 | JNI tables | `src/abi.rs` | Slot indices, VM/env handles, tables, named failure thunks |
-| Session | `src/session.rs` | Classes, methods, references, frames, exceptions, threads, monitors, builtins |
+| Session | `src/session.rs`, `src/heap.rs`, `src/session_threads.rs`, `src/session_handles.rs`, `src/session_classes.rs`, `src/session_dispatch.rs`, `src/builtins.rs`, `src/shims.rs` | Classes, methods, references, frames, exceptions, threads, monitors, builtins |
+| Class lookup | `src/class_lookup.rs`, `tests/unit/class_lookup.rs` | Optional verified catalog, declarations and typed non-creating misses |
 | Fields | `src/fields.rs` | Exact declaration index, field IDs, typed values and object reference edges |
 | Object arrays | `src/objects.rs` | Checked object arrays retaining referenced entities |
 | Primitive arrays | `src/primitive_arrays.rs`, `src/bytes.rs` | All eight typed POD arrays, shared rooted copy/critical leases and two byte-view adapters |
@@ -56,6 +81,8 @@ Capability `android_jni_vm`, `Kind::Runtime`, artifact `libandroid_jni_vm.so` (c
 | Scalar calls | `src/scalar_calls.rs` | Safe descriptor classification and typed byte/char/short/double call boundaries |
 | Nonvirtual calls | `src/nonvirtual_calls.rs` | Typed nonvirtual A entries over the shared checked dispatch and explicit typed DefineClass failure |
 | Native frames | `src/native_frames.rs` | Safe automatic native scope, independent input locals, return promotion, guarded boundary and Drop cleanup |
-| Unit tests | `tests/unit/` | Resolver, tables, field-index collision/shadowing/concurrency, session semantics, frames, threads, stream buffer |
+| Unit tests | `tests/unit/` | JNI function tables, field-index collision/shadowing/concurrency, session semantics, frames, threads, stream buffer |
 | Integration tests | `tests/cached_calls.rs` | Allocation and provider-query cost regressions |
-| Fixtures | `tests/fixtures/` | `rudroid52_probe.c` checks JNI semantics, framework URI/orientation and real system CA export (including explicit rejection and independent byte copies) through table calls; step 21 checks real float defaults through both A and promoted variadic calls; vendored Apache-2.0 AOSP `jni.h`; no sibling-repository include; run by `project/unity_loader/tests/jni_on_load_fixture.rs` |
+| Fixtures | `tests/fixtures/` | `rudroid52_probe.c` checks JNI semantics, framework URI/orientation, CA export, float defaults, Application identity and Intent/string-Bundle isolation through table calls; vendored Apache-2.0 AOSP `jni.h`; no sibling-repository include; run by `project/unity_loader/tests/jni_on_load_fixture.rs` |
+
+Local references are indexed by pushed frame. Returning from a warmed native frame reuses its small bucket. Class-name hits share a read lock while class registration rechecks under the write lock.

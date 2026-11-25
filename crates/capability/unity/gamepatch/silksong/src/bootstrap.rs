@@ -3,7 +3,10 @@
 //! POS:    safe startup policy; no managed references survive, no destruction or unloading
 #![forbid(unsafe_code)]
 use super::SilksongFeatures;
-use rudroid_common::{il2cpp::Il2cpp, unity_objects::NamedGameObjectPruner};
+use rudroid_unity_common::{
+    il2cpp::Il2cpp,
+    unity_objects::NamedGameObjectPruner,
+};
 use std::ffi::CStr;
 
 /// Hide only the verified launcher's child panel after its original Start and

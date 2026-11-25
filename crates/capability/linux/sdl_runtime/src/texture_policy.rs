@@ -77,7 +77,7 @@ pub(super) fn policy() -> &'static Policy {
 pub(super) fn enabled() -> bool {
     POLICY
         .get()
-        .is_some_and(|p| p.rgba > 0 || p.etc > 0 || p.astc > 0 || p.stats)
+        .is_some_and(|p| p.rgba > 0 || p.etc > 0 || p.astc > 0)
 }
 pub(super) fn raw(format: u32) -> bool {
     matches!(format, 0x8058 | 0x8051 | 0x1908 | 0x1907 | 0x8c41 | 0x8c43)

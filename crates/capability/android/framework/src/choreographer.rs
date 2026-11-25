@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-static INSTANCES: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+static INSTANCES: OnceLock<Mutex<HashMap<std::thread::ThreadId, usize>>> = OnceLock::new();
 static TASKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 static INTERVAL: OnceLock<u64> = OnceLock::new();
@@ -60,9 +60,12 @@ extern "C" fn instance(env: JniEnv, _class: JObject) -> JObject {
     if pending(env) {
         return std::ptr::null_mut();
     }
-    let id = super::threads::current_id();
-    if let Some(reference) = instances.get(&id) {
-        return local(env, *reference);
+    let id = std::thread::current().id();
+    if let Some(&reference) = instances.get(&id) {
+        let object = local(env, reference);
+        if !object.is_null() || pending(env) { return object; }
+        instances.remove(&id);
+        delete_weak(env, reference);
     }
     let object = super::java::allocate(env, c"android/view/Choreographer");
     if object.is_null() {

@@ -5,20 +5,22 @@
 //!
 //! Addons subscribe to specific kinds (e.g. the burst addon waits for
 //! `Unity` before mapping its library); the guest bring-up emits these
-//! events in reference order.
+//! events in reference order. Discriminants 100..=103 are engine lifecycle
+//! events (script-ready / maintenance / stopping / frame); variant names keep
+//! the historical Unity spellings so call sites stay stable.
 #![forbid(unsafe_code)]
 
 /// Guest module identity. Discriminants 0..=8 match `RudroidModuleKind` in the
 /// read-only reference (`plugin_api.h`).
 ///
-/// `Il2cppReady` is a Rust-side runtime lifecycle pseudo-event (ticket 78):
-/// fired by the `il2cpp_hook` capability through
-/// `HostApiV0.fire_module_event` after the guest's `il2cpp_init` returned —
-/// the reference `il2cpp_post_init` broker's event-model translation. The
-/// value sits above the reference discriminant range on purpose: it never
-/// collides with a real guest module kind.
-/// `UnityFrame`, `UnityMaintenance` and `UnityStopping` are mapping-free events,
-/// dispatched on the selected profile's player thread.
+/// `Il2cppReady` is a Rust-side engine lifecycle pseudo-event (ticket 78;
+/// conceptual `EngineScriptReady`): fired by the `il2cpp_hook` capability
+/// through `HostApiV0.fire_module_event` after the guest's `il2cpp_init`
+/// returned — the reference `il2cpp_post_init` broker's event-model
+/// translation. The value sits above the reference discriminant range on
+/// purpose: it never collides with a real guest module kind.
+/// `UnityFrame`, `UnityMaintenance` and `UnityStopping` are mapping-free
+/// engine lifecycle events, dispatched on the selected profile's player thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum ModuleKind {

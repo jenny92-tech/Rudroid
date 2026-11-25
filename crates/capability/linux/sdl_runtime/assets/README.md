@@ -24,7 +24,7 @@ file lookup or new dependency on a handheld. The one-shot shader composites
 its alpha over the dark background; the temporary texture and geometry are
 released before guest activation, with no animation, wait or gameplay work.
 Embedded `.rgba` bytes participate in the kit fingerprint. RUDROID and the
-Unity Loader subtitle are drawn separately by `startup_brand.rs`.
+Android Loader subtitle are drawn separately by `startup_brand.rs`.
 
 Generated master PNG SHA256: `1497dd928cc9593f807cb9c1978704ee59ba14e856ec6557610712887f0bafa7`
 

@@ -62,6 +62,7 @@ impl Drop for Session {
 
 fn empty_report() -> CRudroidSdlReport {
     CRudroidSdlReport {
+        graphics_api: 0,
         window_w: 0,
         window_h: 0,
         major: 0,

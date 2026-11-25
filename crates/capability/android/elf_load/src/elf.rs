@@ -1,3 +1,6 @@
+//! INPUT: ELF64 little-endian AArch64 file bytes
+//! OUTPUT: bounded program, dynamic and symbol metadata
+//! POS: file parser shared by executable and buffer loaders
 //! ELF64 (AArch64) parsing: headers, program headers, dynamic table,
 //! dynamic symbol/string tables and relocation sections. Pure inspection —
 //! no memory mapping here (see `GuestModule` in the crate root).
@@ -27,6 +30,7 @@ pub enum ElfError {
     ImageTooLarge(u64),
     /// DT_PLTREL does not name DT_RELA — PLT handling is RELA-only here (48).
     UnsupportedPltRel(u64),
+    InvalidSymbolEntrySize(u64),
     /// A dynamic-string access left the range described by
     /// DT_STRTAB/DT_STRSZ (ticket 64). The table itself must exist and be
     /// file-backed; offsets and their NUL must stay inside it.
@@ -45,10 +49,17 @@ pub enum ElfError {
     /// The init-array is malformed: empty or unaligned DT_INIT_ARRAYSZ, or a
     /// range no PT_LOAD segment backs.
     InvalidInitArray(&'static str),
+    /// DT_INIT is present but does not denote a byte in a file-backed
+    /// executable PT_LOAD segment.
+    InvalidInit(&'static str),
     /// The symbol-version tables are malformed (ticket 86): a versioned
     /// dynsym index with no DT_VERNEED, or a VERNEED walk that leaves the
     /// file. Version support is precise-reject, never silent name binding.
     InvalidVerneed(&'static str),
+    /// A versioned DEFINITION table is malformed: missing DT_VERDEF, an
+    /// entry/auxiliary walk outside a file-backed PT_LOAD, or no definition
+    /// for the dynsym VERSYM index.
+    InvalidVerdef(&'static str),
     /// A hash-table chain walk revisits entries without terminating — the
     /// table is malformed (cyclic), not truncated.
     CyclicHashChain(&'static str),
@@ -57,6 +68,7 @@ pub enum ElfError {
 impl std::fmt::Display for ElfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ElfError::InvalidSymbolEntrySize(n) => write!(f, "ELF64 DT_SYMENT must be 24, found {n}"),
             ElfError::TooSmall => write!(f, "guest ELF smaller than ELF64 header"),
             ElfError::BadMagic => write!(f, "guest ELF magic mismatch (not an ELF)"),
             ElfError::Not64Bit => write!(f, "guest ELF is not ELF64"),
@@ -77,7 +89,10 @@ impl std::fmt::Display for ElfError {
                 write!(f, "guest ELF PT_LOAD has p_filesz > p_memsz (malformed)")
             }
             ElfError::SegmentOutsideFile => {
-                write!(f, "guest ELF PT_LOAD file bytes extend past the end of the file")
+                write!(
+                    f,
+                    "guest ELF PT_LOAD file bytes extend past the end of the file"
+                )
             }
             ElfError::Overflow(what) => {
                 write!(f, "guest ELF {what} arithmetic overflows while parsing")
@@ -100,7 +115,10 @@ impl std::fmt::Display for ElfError {
                 "guest ELF uses Android packed sleb128 relocations \
                  (DT_ANDROID_REL/DT_ANDROID_RELA), which this loader does not support"
             ),
-            ElfError::InvalidPackedRelocations(reason)=>write!(f,"guest ELF Android packed sleb128 relocations are invalid: {reason}"),
+            ElfError::InvalidPackedRelocations(reason) => write!(
+                f,
+                "guest ELF Android packed sleb128 relocations are invalid: {reason}"
+            ),
             ElfError::IncompleteRelr => write!(
                 f,
                 "guest ELF declares DT_RELR without DT_RELRSZ (or vice versa)"
@@ -115,11 +133,23 @@ impl std::fmt::Display for ElfError {
             ElfError::InvalidInitArray(what) => {
                 write!(f, "guest ELF init-array is invalid: {what}")
             }
+            ElfError::InvalidInit(what) => {
+                write!(f, "guest ELF DT_INIT is invalid: {what}")
+            }
             ElfError::InvalidVerneed(what) => {
                 write!(f, "guest ELF symbol-version tables are invalid: {what}")
             }
+            ElfError::InvalidVerdef(what) => {
+                write!(
+                    f,
+                    "guest ELF symbol-version definition tables are invalid: {what}"
+                )
+            }
             ElfError::CyclicHashChain(table) => {
-                write!(f, "guest ELF {table} hash chain is cyclic (malformed table)")
+                write!(
+                    f,
+                    "guest ELF {table} hash chain is cyclic (malformed table)"
+                )
             }
         }
     }
@@ -148,10 +178,14 @@ pub const DT_STRSZ: u64 = 10;
 pub const DT_SYMENT: u64 = 11;
 pub const DT_PLTREL: u64 = 20;
 pub const DT_JMPREL: u64 = 23;
+pub const DT_SONAME: u64 = 14;
 /// GNU symbol versioning (ticket 86 rework): the per-symbol version index
-/// table and the version-requirement table. Parsed so versioned undefined
-/// imports can be refused PRECISELY instead of binding by bare name.
+/// table, version-requirement table and version-definition table. Parsed so
+/// versioned imports apply the provider DSO's VERDEF/GLOBAL rule and never
+/// bind by bare name.
 pub const DT_VERSYM: u64 = 0x6fff_fff0;
+pub const DT_VERDEF: u64 = 0x6fff_fffc;
+pub const DT_VERDEFNUM: u64 = 0x6fff_fffd;
 pub const DT_VERNEED: u64 = 0x6fff_fffe;
 pub const DT_VERNEEDNUM: u64 = 0x6fff_ffff;
 pub const DT_RELRSZ: u64 = 35;
@@ -159,6 +193,7 @@ pub const DT_RELR: u64 = 36;
 pub const DT_RELRENT: u64 = 37;
 pub const DT_INIT_ARRAY: u64 = 25;
 pub const DT_INIT_ARRAYSZ: u64 = 27;
+pub const DT_INIT: u64 = 12;
 pub const DT_GNU_HASH: u64 = 0x6ffffef5;
 /// Transitional Android tags for packed-relative relocations; the payload is
 /// identical to DT_RELR (bionic matched these before the generic tags were
@@ -169,9 +204,9 @@ pub const DT_ANDROID_RELRENT: u64 = 0x6fffe003;
 /// Android packed sleb128 relocations — decoded by the reference `so_util`,
 /// rejected explicitly here (see [`ElfError::UnsupportedPackedRelocations`]).
 pub const DT_ANDROID_REL: u64 = 0x6000000f;
-pub const DT_ANDROID_RELSZ:u64=0x60000010;
+pub const DT_ANDROID_RELSZ: u64 = 0x60000010;
 pub const DT_ANDROID_RELA: u64 = 0x60000011;
-pub const DT_ANDROID_RELASZ:u64=0x60000012;
+pub const DT_ANDROID_RELASZ: u64 = 0x60000012;
 
 pub const R_AARCH64_ABS64: u32 = 257;
 pub const R_AARCH64_GLOB_DAT: u32 = 1025;
@@ -194,11 +229,19 @@ pub struct ElfView<'a> {
     pub bytes: &'a [u8],
     /// PT_LOAD segments: (vaddr, offset, filesz, memsz).
     pub loads: Vec<LoadSegment>,
+    /// PT_DYNAMIC segment: (vaddr, filesz). Runtime diagnostics read this
+    /// standard range at `load_base + vaddr`; it is never treated as a file
+    /// offset or as a virtual-address slice into [`Self::bytes`].
+    pub dynamic: (u64, u64),
     /// vaddr of the dynamic symbol table.
     pub symtab: u64,
     /// vaddr of the dynamic string table.
     pub strtab: u64,
     pub strsz: u64,
+    /// Effective ELF64 dynamic symbol entry size. An absent DT_SYMENT is
+    /// normalized to the ELF64 default 24 so file/live diagnostics compare
+    /// the same accepted representation.
+    pub syment: u64,
     /// Number of dynsym entries — derived from hash tables at lookup time.
     pub gnu_hash: Option<u64>,
     pub sysv_hash: Option<u64>,
@@ -207,28 +250,39 @@ pub struct ElfView<'a> {
     plt_rela: Option<(u64, u64)>,
     /// (vaddr, size in bytes) of DT_RELR/DT_ANDROID_RELR (.relr.dyn).
     pub relr: Option<(u64, u64)>,
-    pub packed:[Option<(u64,u64)>;2],
+    pub packed: [Option<(u64, u64)>; 2],
+    /// vaddr of the legacy single DT_INIT function, when present. The
+    /// executable backend calls it once before `.init_array` entries.
+    pub init: Option<u64>,
     /// (vaddr, size in bytes) of DT_INIT_ARRAY — the constructor pointer
-    /// table the executable backend runs after relocations (reference
-    /// `so_initialize`; DT_INIT is NOT part of the reference semantics).
+    /// table the executable backend runs after DT_INIT and relocations.
     pub init_array: Option<(u64, u64)>,
     /// vaddr of the DT_VERSYM index table (u16 per dynsym entry), when the
     /// module carries GNU symbol versioning (ticket 86).
     pub versym: Option<u64>,
     /// (vaddr, entry count) of the DT_VERNEED requirement table (ticket 86).
     pub verneed: Option<(u64, u64)>,
+    /// (vaddr, entry count) of the DT_VERDEF definition table (ticket 86).
+    pub verdef: Option<(u64, u64)>,
+    /// String-table offset of DT_SONAME. Required by the format and retained
+    /// for diagnostics, but VERNEED `vn_file` never scopes symbol lookup.
+    pub soname: Option<u64>,
     /// String-table offsets of DT_NEEDED entries, in declaration order.
     pub needed: Vec<u64>,
 }
 
 /// A resolved version requirement (ticket 86): `name` is the version
 /// string (e.g. `GLIBC_2.34`) from the matching VERNEED aux entry, `file`
-/// the library whose Verneed required it. Binding an import that carries
-/// one requires a version-aware provider — identical names do not prove ABI compatibility.
+/// the library whose Verneed required it, and `hash` its `vna_hash`.
+///
+/// Bionic does not scope a lookup by `file`: it is diagnostic provenance
+/// only. Each provider DSO independently decides whether it defines `name`
+/// in VERDEF; when it does not, its GLOBAL version index is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SymbolVersion<'a> {
     pub name: &'a str,
     pub file: &'a str,
+    pub hash: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,9 +348,11 @@ impl<'a> ElfView<'a> {
         for index in 0..phnum {
             // Checked entry arithmetic: hostile phoff/phentsize values must
             // produce a diagnostic, never a wrap-around (ticket 47).
-            let entry = (phoff as usize).checked_add(index.checked_mul(phentsize).ok_or(
-                ElfError::Overflow("program header index"),
-            )?);
+            let entry = (phoff as usize).checked_add(
+                index
+                    .checked_mul(phentsize)
+                    .ok_or(ElfError::Overflow("program header index"))?,
+            );
             let base = match entry {
                 Some(base) if base.saturating_add(phentsize) <= bytes.len() => base,
                 _ => return Err(ElfError::TruncatedProgramHeaders),
@@ -316,7 +372,11 @@ impl<'a> ElfView<'a> {
                     if segment.filesz > segment.memsz {
                         return Err(ElfError::FileszExceedsMemsz);
                     }
-                    if segment.offset.checked_add(segment.filesz).map(|end| end > bytes.len() as u64) != Some(false)
+                    if segment
+                        .offset
+                        .checked_add(segment.filesz)
+                        .map(|end| end > bytes.len() as u64)
+                        != Some(false)
                     {
                         return Err(ElfError::SegmentOutsideFile);
                     }
@@ -341,18 +401,23 @@ impl<'a> ElfView<'a> {
         let mut view = ElfView {
             bytes,
             loads,
+            dynamic: (dyn_vaddr, dyn_filesz),
             symtab: 0,
             strtab: 0,
             strsz: 0,
+            syment: 24,
             gnu_hash: None,
             sysv_hash: None,
             rela: None,
             plt_rela: None,
             relr: None,
-            packed:[None,None],
+            packed: [None, None],
+            init: None,
             init_array: None,
             versym: None,
             verneed: None,
+            verdef: None,
+            soname: None,
             needed: Vec::new(),
         };
         // The dynamic table is addressed by vaddr; translate through the
@@ -377,7 +442,8 @@ impl<'a> ElfView<'a> {
             .filter(|(t, _)| *t == DT_NEEDED)
             .map(|(_, v)| *v)
             .collect();
-        view.strtab = find(DT_STRTAB).ok_or(ElfError::MissingDynamic(DT_STRTAB as u32, "STRTAB"))?;
+        view.strtab =
+            find(DT_STRTAB).ok_or(ElfError::MissingDynamic(DT_STRTAB as u32, "STRTAB"))?;
         // DT_STRSZ bounds every dynamic-string read (ticket 64): a missing or
         // zero size is a diagnostic — the parser never falls back to scanning
         // the whole file.
@@ -385,7 +451,11 @@ impl<'a> ElfView<'a> {
         if view.strsz == 0 {
             return Err(ElfError::DynstrBounds("DT_STRSZ is zero"));
         }
-        view.symtab = find(DT_SYMTAB).ok_or(ElfError::MissingDynamic(DT_SYMTAB as u32, "SYMTAB"))?;
+        view.symtab =
+            find(DT_SYMTAB).ok_or(ElfError::MissingDynamic(DT_SYMTAB as u32, "SYMTAB"))?;
+        view.syment = find(DT_SYMENT).unwrap_or(24);
+        if view.syment != 24 { return Err(ElfError::InvalidSymbolEntrySize(view.syment)); }
+        view.soname = find(DT_SONAME);
         view.sysv_hash = find(DT_HASH);
         view.gnu_hash = find(DT_GNU_HASH);
         if let (Some(addr), Some(size)) = (find(DT_RELA), find(DT_RELASZ)) {
@@ -400,9 +470,28 @@ impl<'a> ElfView<'a> {
             }
         }
         // Android APS2 uses four distinct tags; real RELA is 0x60000011, not RELSZ.
-        for (index,(address_tag,size_tag)) in [(DT_ANDROID_REL,DT_ANDROID_RELSZ),(DT_ANDROID_RELA,DT_ANDROID_RELASZ)].into_iter().enumerate(){
-            match (find(address_tag),find(size_tag)){
-                (None,None)=>{},(Some(address),Some(size))=>{let bytes=view.vaddr_slice(address,size).map_err(|_|ElfError::InvalidPackedRelocations("table range is not file-backed"))?;super::packed::Decoder::new(bytes,index==1).map_err(ElfError::InvalidPackedRelocations)?;view.packed[index]=Some((address,size));},_=>return Err(ElfError::InvalidPackedRelocations("address/size tag pair is incomplete")),
+        for (index, (address_tag, size_tag)) in [
+            (DT_ANDROID_REL, DT_ANDROID_RELSZ),
+            (DT_ANDROID_RELA, DT_ANDROID_RELASZ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            match (find(address_tag), find(size_tag)) {
+                (None, None) => {}
+                (Some(address), Some(size)) => {
+                    let bytes = view.vaddr_slice(address, size).map_err(|_| {
+                        ElfError::InvalidPackedRelocations("table range is not file-backed")
+                    })?;
+                    super::packed::Decoder::new(bytes, index == 1)
+                        .map_err(ElfError::InvalidPackedRelocations)?;
+                    view.packed[index] = Some((address, size));
+                }
+                _ => {
+                    return Err(ElfError::InvalidPackedRelocations(
+                        "address/size tag pair is incomplete",
+                    ))
+                }
             }
         }
         let relr_addr = find(DT_RELR).or(find(DT_ANDROID_RELR));
@@ -430,10 +519,25 @@ impl<'a> ElfView<'a> {
             (None, None) => {}
             _ => return Err(ElfError::IncompleteRelr),
         }
+        // Standard ELF initialization order: DT_INIT executes first, then
+        // each DT_INIT_ARRAY slot. DT_INIT is a code vaddr, so bound it to a
+        // file-backed executable PT_LOAD before the backend may call it.
+        if let Some(addr) = find(DT_INIT) {
+            let executable = view.loads.iter().any(|load| {
+                load.flags & PF_X != 0
+                    && addr >= load.vaddr
+                    && addr - load.vaddr < load.filesz
+            });
+            if !executable {
+                return Err(ElfError::InvalidInit(
+                    "address is not in a file-backed executable PT_LOAD",
+                ));
+            }
+            view.init = Some(addr);
+        }
         // The constructor pointer table (.init_array): the executable
-        // backend runs it after relocations, reference `so_initialize`
-        // semantics. Same half-pair / unaligned / not-file-backed posture
-        // as RELR above.
+        // backend runs it after DT_INIT and relocations. Same half-pair /
+        // unaligned / not-file-backed posture as RELR above.
         match (find(DT_INIT_ARRAY), find(DT_INIT_ARRAYSZ)) {
             (Some(addr), Some(size)) => {
                 if size == 0 || size % 8 != 0 {
@@ -463,7 +567,25 @@ impl<'a> ElfView<'a> {
                 view.verneed = Some((addr, count));
             }
             (None, None) => {}
-            _ => return Err(ElfError::InvalidVerneed("exactly one of DT_VERNEED/DT_VERNEEDNUM")),
+            _ => {
+                return Err(ElfError::InvalidVerneed(
+                    "exactly one of DT_VERNEED/DT_VERNEEDNUM",
+                ))
+            }
+        }
+        match (find(DT_VERDEF), find(DT_VERDEFNUM)) {
+            (Some(addr), Some(count)) => {
+                if count == 0 {
+                    return Err(ElfError::InvalidVerdef("DT_VERDEFNUM is zero"));
+                }
+                view.verdef = Some((addr, count));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ElfError::InvalidVerdef(
+                    "exactly one of DT_VERDEF/DT_VERDEFNUM",
+                ))
+            }
         }
         // The declared string table must be backed by a PT_LOAD file range
         // (ticket 64); string reads slice only these bytes, never scan.
@@ -500,7 +622,11 @@ impl<'a> ElfView<'a> {
         let entry = 24usize;
         let table = self.vaddr_to_file_offset(self.symtab)?;
         table
-            .checked_add(index.checked_mul(entry).ok_or(ElfError::TruncatedSection("dynsym"))?)
+            .checked_add(
+                index
+                    .checked_mul(entry)
+                    .ok_or(ElfError::TruncatedSection("dynsym"))?,
+            )
             .ok_or(ElfError::TruncatedSection("dynsym"))
     }
 
@@ -509,11 +635,19 @@ impl<'a> ElfView<'a> {
         self.needed.iter().map(|off| self.str_at(*off)).collect()
     }
 
+    /// The declared DT_SONAME, if any. This is descriptive; Bionic does not
+    /// restrict versioned interposition to the SONAME named by VERNEED.
+    pub fn soname(&self) -> Result<Option<&'a str>, ElfError> {
+        self.soname.map(|offset| self.str_at(offset)).transpose()
+    }
+
     /// Translate a vaddr to a slice into the raw file bytes. All segment
     /// arithmetic is checked; hostile vaddr/len values produce diagnostics
     /// instead of wrapping around (ticket 47).
     pub fn vaddr_slice(&self, vaddr: u64, len: u64) -> Result<&'a [u8], ElfError> {
-        let end = vaddr.checked_add(len).ok_or(ElfError::Overflow("vaddr range"))?;
+        let end = vaddr
+            .checked_add(len)
+            .ok_or(ElfError::Overflow("vaddr range"))?;
         for load in &self.loads {
             let file_end = load
                 .vaddr
@@ -525,7 +659,12 @@ impl<'a> ElfView<'a> {
                     .ok_or(ElfError::Overflow("file offset"))?;
                 return self
                     .bytes
-                    .get(start..start.checked_add(len as usize).ok_or(ElfError::Overflow("file offset"))?)
+                    .get(
+                        start
+                            ..start
+                                .checked_add(len as usize)
+                                .ok_or(ElfError::Overflow("file offset"))?,
+                    )
                     .ok_or(ElfError::TruncatedSection("vaddr range"));
             }
         }
@@ -590,9 +729,7 @@ impl<'a> ElfView<'a> {
             let Some((str_type, str_offset, str_size, _)) = section(sh_link) else {
                 continue;
             };
-            if str_type != SHT_STRTAB
-                || str_offset > file_size
-                || str_size > file_size - str_offset
+            if str_type != SHT_STRTAB || str_offset > file_size || str_size > file_size - str_offset
             {
                 continue;
             }
@@ -619,32 +756,157 @@ impl<'a> ElfView<'a> {
         None
     }
 
+    /// Raw VERSYM word for dynsym entry `index`, including the hidden bit.
+    /// `Ok(None)` means the module has no DT_VERSYM at all.
+    pub(crate) fn versym(&self, index: usize) -> Result<Option<u16>, ElfError> {
+        let Some(versym) = self.versym else {
+            return Ok(None);
+        };
+        let relative = index
+            .checked_mul(2)
+            .ok_or(ElfError::Overflow("versym index"))? as u64;
+        let address = versym
+            .checked_add(relative)
+            .ok_or(ElfError::Overflow("versym address"))?;
+        let raw = self
+            .vaddr_slice(address, 2)
+            .map_err(|_| ElfError::TruncatedSection("versym"))?;
+        Ok(Some(u16::from_le_bytes(
+            raw.try_into().expect("2 bytes"),
+        )))
+    }
+
+    fn version_index(&self, index: usize) -> Result<Option<usize>, ElfError> {
+        let version_index = self
+            .versym(index)?
+            .map(|version| (version & 0x7fff) as usize)
+            .filter(|version| *version > 1);
+        Ok(version_index)
+    }
+
+    /// The provider's VERDEF node for `required`, following Bionic's
+    /// `find_verdef_version_index`: match the requested SysV hash and name
+    /// against the DSO's own definitions. `None` (including a DSO without
+    /// VERDEF) means the caller uses the GLOBAL version index (1).
+    ///
+    /// Every visited entry is still bounds-checked and hash-validated, so a
+    /// forged or truncated table is an error rather than a GLOBAL fallback.
+    pub fn verdef_version_index(
+        &self,
+        required: SymbolVersion<'_>,
+    ) -> Result<Option<u16>, ElfError> {
+        const VER_FLG_BASE: u16 = 0x1;
+        let Some((verdef, count)) = self.verdef else {
+            return Ok(None);
+        };
+        let mut definition_address = verdef;
+        for _ in 0..count.min(self.bytes.len() as u64 / 20) {
+            let definition = self
+                .vaddr_slice(definition_address, 20)
+                .map_err(|_| ElfError::InvalidVerdef("Verdef entry leaves its PT_LOAD"))?;
+            let read16 =
+                |at: usize| u16::from_le_bytes(definition[at..at + 2].try_into().expect("2"));
+            let read32 =
+                |at: usize| u32::from_le_bytes(definition[at..at + 4].try_into().expect("4"));
+            if read16(0) != 1 {
+                return Err(ElfError::InvalidVerdef("unsupported Verdef version"));
+            }
+            let vd_flags = read16(2);
+            let vd_ndx = read16(4) & 0x7fff;
+            let vd_cnt = read16(6) as usize;
+            let vd_hash = read32(8);
+            let vd_aux = read32(12);
+            let vd_next = read32(16);
+            if vd_cnt == 0 {
+                return Err(ElfError::InvalidVerdef("Verdef has no Verdaux"));
+            }
+            if vd_aux < 20 {
+                return Err(ElfError::InvalidVerdef("Verdef aux overlaps its entry"));
+            }
+            let aux_address = definition_address
+                .checked_add(vd_aux as u64)
+                .ok_or(ElfError::InvalidVerdef("Verdef aux offset overflows"))?;
+            let aux = self
+                .vaddr_slice(aux_address, 8)
+                .map_err(|_| ElfError::InvalidVerdef("Verdaux entry leaves its PT_LOAD"))?;
+            let vda_name = u32::from_le_bytes(aux[0..4].try_into().expect("4"));
+            if vda_name == 0 {
+                return Err(ElfError::InvalidVerdef("Verdaux has no version name"));
+            }
+            let name = self.str_at(vda_name as u64)?;
+            if crate::hash::sysv_hash(name) != vd_hash {
+                return Err(ElfError::InvalidVerdef(
+                    "Verdef hash does not match its version name",
+                ));
+            }
+            // The base definition names the file itself and is not a
+            // symbol-version node (Bionic skips VER_FLG_BASE).
+            if vd_flags & VER_FLG_BASE == 0
+                && vd_hash == required.hash
+                && name == required.name
+            {
+                if vd_ndx <= 1 {
+                    return Err(ElfError::InvalidVerdef(
+                        "version definition uses a reserved index",
+                    ));
+                }
+                return Ok(Some(vd_ndx));
+            }
+            if vd_next == 0 {
+                break;
+            }
+            if vd_next < 20 {
+                return Err(ElfError::InvalidVerdef("Verdef next overlaps its entry"));
+            }
+            definition_address = definition_address
+                .checked_add(vd_next as u64)
+                .ok_or(ElfError::InvalidVerdef("Verdef next overflows"))?;
+        }
+        Ok(None)
+    }
+
+    /// Whether dynsym entry `index` matches the provider's requested version
+    /// node under Bionic's `check_symbol_version` rule.
+    ///
+    /// - no DT_VERSYM: every requested version matches;
+    /// - otherwise compare the VERSYM index with the requested node, masking
+    ///   the hidden bit. A missing requested definition means GLOBAL (1).
+    /// - LOCAL (0) never matches.
+    ///
+    /// `requested` must already come from [`Self::verdef_version_index`].
+    pub fn symbol_matches_version(
+        &self,
+        index: usize,
+        requested: Option<u16>,
+    ) -> Result<bool, ElfError> {
+        let Some(version) = self.versym(index)? else {
+            return Ok(true);
+        };
+        let version = version & 0x7fff;
+        if version == 0 {
+            return Ok(false);
+        }
+        if version > 1 && self.verdef.is_none() {
+            return Err(ElfError::InvalidVerdef(
+                "versioned dynsym index but no DT_VERDEF",
+            ));
+        }
+        Ok(version == requested.unwrap_or(1))
+    }
+
     /// The version requirement attached to dynamic symbol `index`, when the
     /// module carries GNU symbol versioning (ticket 86 rework).
     ///
     /// `Ok(None)` means "no requirement": no DT_VERSYM table at all, or the
     /// index values 0 (LOCAL) / 1 (`*global*` baseline) which carry none.
-    /// `Ok(Some(_))` names the version and the file whose VERNEED entry
-    /// requires it — the relocation layer must then REFUSE to bind that
-    /// import by bare name instead of guessing which implementation the
-    /// version belongs to. `Err` marks malformed version tables.
+    /// `Ok(Some(_))` names the version, requiring file and version hash from
+    /// VERNEED — the relocation layer must then REFUSE to bind that import by
+    /// bare name instead of guessing which implementation the version belongs
+    /// to. `Err` marks malformed version tables.
     pub fn symbol_version(&self, index: usize) -> Result<Option<SymbolVersion<'a>>, ElfError> {
-        let Some(versym) = self.versym else {
+        let Some(version_index) = self.version_index(index)? else {
             return Ok(None);
         };
-        let table = self.vaddr_to_file_offset(versym)?;
-        let at = table
-            .checked_add(index.checked_mul(2).ok_or(ElfError::Overflow("versym index"))?)
-            .ok_or(ElfError::TruncatedSection("versym"))?;
-        let raw = self
-            .bytes
-            .get(at..at + 2)
-            .ok_or(ElfError::TruncatedSection("versym"))?;
-        let version_index =
-            (u16::from_le_bytes(raw.try_into().expect("2 bytes")) & 0x7fff) as usize;
-        if version_index <= 1 {
-            return Ok(None);
-        }
         // Walk the VERNEED list: Verneed { vn_version: u16, vn_cnt: u16,
         // vn_file: u32, vn_aux: u32, vn_next: u32 }, then its Vernaux list
         // { vna_hash: u32, vna_flags: u16, vna_other: u16, vna_name: u32,
@@ -655,52 +917,175 @@ impl<'a> ElfView<'a> {
                 "versioned dynsym index but no DT_VERNEED",
             ));
         };
-        let mut need_offset = self.vaddr_to_file_offset(verneed)?;
-        // A Verneed entry is 16 bytes: the file bounds the walk, so a
-        // hostile DT_VERNEEDNUM cannot spin past the image.
+        let mut need_address = verneed;
+        // Every entry is translated through a file-backed PT_LOAD, so a
+        // hostile count/next value can never make the walk cross a section or
+        // leave the declared table's backed range.
         for _ in 0..count.min(self.bytes.len() as u64 / 16) {
             let need = self
-                .bytes
-                .get(need_offset..need_offset + 16)
-                .ok_or(ElfError::InvalidVerneed("Verneed entry leaves the file"))?;
+                .vaddr_slice(need_address, 16)
+                .map_err(|_| ElfError::InvalidVerneed("Verneed entry leaves its PT_LOAD"))?;
             let read32 = |at: usize| u32::from_le_bytes(need[at..at + 4].try_into().expect("4"));
             let vn_cnt = u16::from_le_bytes(need[2..4].try_into().expect("2")) as usize;
             let vn_file = read32(4);
             let vn_aux = read32(8) as usize;
             let vn_next = read32(12);
             let file = self.str_at(vn_file as u64)?;
-            let mut aux_offset = need_offset
-                .checked_add(vn_aux)
+            if vn_aux < 16 {
+                return Err(ElfError::InvalidVerneed("Verneed aux overlaps its entry"));
+            }
+            let mut aux_address = need_address
+                .checked_add(vn_aux as u64)
                 .ok_or(ElfError::InvalidVerneed("Verneed aux offset overflows"))?;
             for _ in 0..vn_cnt {
                 let aux = self
-                    .bytes
-                    .get(aux_offset..aux_offset + 16)
-                    .ok_or(ElfError::InvalidVerneed("Vernaux entry leaves the file"))?;
+                    .vaddr_slice(aux_address, 16)
+                    .map_err(|_| ElfError::InvalidVerneed("Vernaux entry leaves its PT_LOAD"))?;
                 let a32 = |at: usize| u32::from_le_bytes(aux[at..at + 4].try_into().expect("4"));
+                let vna_hash = a32(0);
                 let vna_other = u16::from_le_bytes(aux[6..8].try_into().expect("2")) & 0x7fff;
                 let vna_name = a32(8);
                 let vna_next = a32(12);
                 if vna_other as usize == version_index {
                     let name = self.str_at(vna_name as u64)?;
-                    return Ok(Some(SymbolVersion { name, file }));
+                    // Verneed/Vernaux hashes are defined by the ELF gABI as
+                    // SysV hashes, not the separate GNU symbol-name hash.
+                    if crate::hash::sysv_hash(name) != vna_hash {
+                        return Err(ElfError::InvalidVerneed(
+                            "Vernaux hash does not match its version name",
+                        ));
+                    }
+                    return Ok(Some(SymbolVersion {
+                        name,
+                        file,
+                        hash: vna_hash,
+                    }));
                 }
                 if vna_next == 0 {
                     break;
                 }
-                aux_offset = aux_offset
-                    .checked_add(vna_next as usize)
+                if vna_next < 16 {
+                    return Err(ElfError::InvalidVerneed("Vernaux next overlaps its entry"));
+                }
+                aux_address = aux_address
+                    .checked_add(vna_next as u64)
                     .ok_or(ElfError::InvalidVerneed("Vernaux next overflows"))?;
             }
             if vn_next == 0 {
                 break;
             }
-            need_offset = need_offset
-                .checked_add(vn_next as usize)
+            if vn_next < 16 {
+                return Err(ElfError::InvalidVerneed("Verneed next overlaps its entry"));
+            }
+            need_address = need_address
+                .checked_add(vn_next as u64)
                 .ok_or(ElfError::InvalidVerneed("Verneed next overflows"))?;
         }
         Err(ElfError::InvalidVerneed(
             "no VERNEED entry matches the versioned dynsym index",
+        ))
+    }
+
+    /// The version DEFINITION attached to dynamic symbol `index`, for direct
+    /// inspection and malformed-table tests. Lookup policy lives in
+    /// [`Self::verdef_version_index`] and [`Self::symbol_matches_version`];
+    /// a baseline symbol (VERSYM 0/1) is not a named definition here. The
+    /// walk uses PT_LOAD-backed slices for every Verdef/Verdaux entry and the
+    /// same bounded dynamic string table.
+    pub fn symbol_definition(&self, index: usize) -> Result<Option<(&'a str, u32)>, ElfError> {
+        let Some(version_index) = self.version_index(index)? else {
+            return Ok(None);
+        };
+        let Some((verdef, count)) = self.verdef else {
+            return Err(ElfError::InvalidVerdef(
+                "versioned dynsym index but no DT_VERDEF",
+            ));
+        };
+        let mut definition_address = verdef;
+        for _ in 0..count.min(self.bytes.len() as u64 / 20) {
+            let definition = self
+                .vaddr_slice(definition_address, 20)
+                .map_err(|_| ElfError::InvalidVerdef("Verdef entry leaves its PT_LOAD"))?;
+            let read16 =
+                |at: usize| u16::from_le_bytes(definition[at..at + 2].try_into().expect("2"));
+            let read32 =
+                |at: usize| u32::from_le_bytes(definition[at..at + 4].try_into().expect("4"));
+            let vd_version = read16(0);
+            if vd_version != 1 {
+                return Err(ElfError::InvalidVerdef("unsupported Verdef version"));
+            }
+            let vd_ndx = read16(4) & 0x7fff;
+            let vd_cnt = read16(6) as usize;
+            let vd_hash = read32(8);
+            let vd_aux = read32(12);
+            let vd_next = read32(16);
+            if vd_cnt == 0 {
+                return Err(ElfError::InvalidVerdef("Verdef has no Verdaux"));
+            }
+            // The version name follows from the first Verdaux. Validate the
+            // hash against that name even for a non-matching entry: a forged
+            // table must not become selectable merely because its numeric
+            // index differs from the dynsym's.
+            let first_aux = vd_aux as u64;
+            if first_aux < 20 {
+                return Err(ElfError::InvalidVerdef("Verdef aux overlaps its entry"));
+            }
+            let aux_address = definition_address
+                .checked_add(first_aux)
+                .ok_or(ElfError::InvalidVerdef("Verdef aux offset overflows"))?;
+            let aux = self
+                .vaddr_slice(aux_address, 8)
+                .map_err(|_| ElfError::InvalidVerdef("Verdaux entry leaves its PT_LOAD"))?;
+            let vda_name = u32::from_le_bytes(aux[0..4].try_into().expect("4"));
+            if vda_name == 0 {
+                return Err(ElfError::InvalidVerdef("Verdaux has no version name"));
+            }
+            let name = self.str_at(vda_name as u64)?;
+            // Verdef/Verdaux hashes also follow the ELF gABI's SysV hash.
+            if crate::hash::sysv_hash(name) != vd_hash {
+                return Err(ElfError::InvalidVerdef(
+                    "Verdef hash does not match its version name",
+                ));
+            }
+            if vd_ndx as usize == version_index {
+                let mut aux_address = definition_address
+                    .checked_add(vd_aux as u64)
+                    .ok_or(ElfError::InvalidVerdef("Verdef aux offset overflows"))?;
+                for _ in 0..vd_cnt {
+                    let aux = self
+                        .vaddr_slice(aux_address, 8)
+                        .map_err(|_| ElfError::InvalidVerdef("Verdaux entry leaves its PT_LOAD"))?;
+                    let vda_name = u32::from_le_bytes(aux[0..4].try_into().expect("4"));
+                    let vda_next = u32::from_le_bytes(aux[4..8].try_into().expect("4"));
+                    if vda_name != 0 {
+                        return Ok(Some((self.str_at(vda_name as u64)?, vd_hash)));
+                    }
+                    if vda_next == 0 {
+                        break;
+                    }
+                    if vda_next < 8 {
+                        return Err(ElfError::InvalidVerdef("Verdaux next overlaps its entry"));
+                    }
+                    aux_address = aux_address
+                        .checked_add(vda_next as u64)
+                        .ok_or(ElfError::InvalidVerdef("Verdaux next overflows"))?;
+                }
+                return Err(ElfError::InvalidVerdef(
+                    "matching Verdef has no version name",
+                ));
+            }
+            if vd_next == 0 {
+                break;
+            }
+            if vd_next < 20 {
+                return Err(ElfError::InvalidVerdef("Verdef next overlaps its entry"));
+            }
+            definition_address = definition_address
+                .checked_add(vd_next as u64)
+                .ok_or(ElfError::InvalidVerdef("Verdef next overflows"))?;
+        }
+        Err(ElfError::InvalidVerdef(
+            "no VERDEF entry matches the versioned dynsym index",
         ))
     }
 
@@ -741,14 +1126,17 @@ impl<'a> ElfView<'a> {
                 *raw = self.vaddr_slice(addr, size)?;
             }
         }
-        Ok(raw_tables.into_iter().flat_map(|raw| raw.chunks_exact(24)).map(|chunk| {
-            // chunks_exact guarantees all fields fit; no pointers into the
-            // executable image are read while relocation writes proceed.
-            let offset = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-            let info = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-            let addend = i64::from_le_bytes(chunk[16..24].try_into().unwrap());
-            (offset, info as u32, (info >> 32) as usize, addend)
-        }))
+        Ok(raw_tables
+            .into_iter()
+            .flat_map(|raw| raw.chunks_exact(24))
+            .map(|chunk| {
+                // chunks_exact guarantees all fields fit; no pointers into the
+                // executable image are read while relocation writes proceed.
+                let offset = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                let info = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+                let addend = i64::from_le_bytes(chunk[16..24].try_into().unwrap());
+                (offset, info as u32, (info >> 32) as usize, addend)
+            }))
     }
 
     /// Owned snapshot for inspection callers that explicitly need one.
@@ -757,8 +1145,12 @@ impl<'a> ElfView<'a> {
         let entries = self.rela_iter()?;
         // Both ranges were validated above; reserve their exact entry count
         // only for callers requesting an owned snapshot.
-        let capacity = self.rela.into_iter().chain(self.plt_rela)
-            .map(|(_, size)| size as usize / 24).sum();
+        let capacity = self
+            .rela
+            .into_iter()
+            .chain(self.plt_rela)
+            .map(|(_, size)| size as usize / 24)
+            .sum();
         let mut out = Vec::with_capacity(capacity);
         out.extend(entries);
         Ok(out)

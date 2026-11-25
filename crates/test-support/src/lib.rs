@@ -1,3 +1,6 @@
+//! INPUT: integration-test workspace, fixtures and temporary paths
+//! OUTPUT: shared test utilities
+//! POS: cross-crate test harness
 //! Dev-only shared test facilities (ticket 81). Never a production
 //! dependency: consumers take it as a dev-dependency, and the deploy kit
 //! never sees it (no descriptor, not a capability).

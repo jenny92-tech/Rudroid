@@ -4,14 +4,19 @@
 |---|---|
 | 用途、源码导航 | [README](../README.md)、[AGENTS](../AGENTS.md)、[workspace](../crates/AGENTS.md) |
 | 构建、验证、交付 | [BUILD-DOCKER](../BUILD-DOCKER.md) |
+| 工具 / 脚本 / 调试入口登记（禁止平行发明） | [TOOLING](TOOLING.md) |
 | 开发边界、生命周期、必要踩坑 | [DEVELOPMENT](../DEVELOPMENT.md) |
 | 新设备、新游戏适配 | [移植指南](../crates/docs/HANDHELD-PORTING-WORKFLOW.md) |
+| 桌面 Unity 数据检查、转换与 ARM Player 准备 | [主机工具](../tools/README.md#桌面-unity-移植准备) |
+| 原生 ARM64 Unity Mono 配置与部署 | [Unity Mono](../crates/docs/UNITY-MONO.md) |
 | 一次生成资源，默认 1 GiB | [资源准备](../tools/README.md) |
 | 当前交付与局限 | [ACCEPTANCE](../crates/docs/ACCEPTANCE.md) |
 | 插件和支持范围 | [能力表](../crates/docs/MIGRATION-MAP.md) |
+| 新增 EngineProfile / 非 Unity 引擎 | [ENGINE-PROFILE-CONTRACT](../crates/docs/ENGINE-PROFILE-CONTRACT.md) |
 | 配置与所有权 | [RUNTIME-POLICY](../crates/docs/RUNTIME-POLICY.md) |
 | 性能取舍及被拒绝策略 | [PERFORMANCE-AUDIT](../crates/docs/PERFORMANCE-AUDIT.md) |
 | Linux ABI/固件兼容 | [LINUX-COMPATIBILITY](../crates/docs/LINUX-COMPATIBILITY.md) |
+| Bionic API 完整性与验证范围 | [BIONIC-COMPATIBILITY](../crates/docs/BIONIC-COMPATIBILITY.md) |
 | C++ 行为对照 | [REFERENCE](../crates/docs/REFERENCE.md) |
 | 参考项目及采用边界 | [REFERENCES](REFERENCES.md) |
 | 术语与文档规则 | [CONTEXT](../CONTEXT.md)、[FRACTAL-DOCS](../FRACTAL-DOCS.md) |

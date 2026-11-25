@@ -1,3 +1,6 @@
+//! INPUT: workspace crate or fixture manifest and requested build profile
+//! OUTPUT: paths to compiled fixture artifacts
+//! POS: shared test harness for nested Cargo builds
 //! Dynamic-fixture assembly rules shared by the integration tests
 //! (tickets 73/75 conventions, extracted by the ticket 81 rework for the
 //! 84 assembly gate): the target dir is resolved the way cargo itself
@@ -33,7 +36,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 /// The SDL backend feature as cargo spells it on the workspace command line
-/// (`docker-rust.sh --sdl`, `cross-build-linux.sh`).
+/// (`docker-rust.sh --sdl`).
 pub const SDL_FEATURE: &str = "rudroid-linux-sdl-runtime/sdl";
 
 /// The cargo binary of the outer invocation.

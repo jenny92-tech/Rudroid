@@ -5,7 +5,7 @@
 //!
 //! Rust analogue of the reference `RudroidPluginApi`: config getters, log, and
 //! — since ticket 45 — the shared-runtime registration surface (module
-//! subscriptions, Unity profile, Android hooks, audio policy, catalog
+//! subscriptions, engine profile, Android hooks, audio policy, catalog
 //! provider and the shared VM/session slot). Everything not listed here
 //! (real JNI VM, guest symbol tables, EGL/texture policies, ...) arrives in
 //! later tickets as the corresponding capabilities land.
@@ -29,21 +29,26 @@
 //!   functions of an unstripped library, e.g. Swappy). It sits at the tail
 //!   of the table, not next to `so_symbol` as in `plugin_api.h`, because the
 //!   tail is the only growth direction.
-//! - `HOST_API_VERSION` is 4: ticket 78 appended the capability-sourced
+//! - `HOST_API_VERSION` is 7: ticket 78 appended the capability-sourced
 //!   lifecycle broadcast (`fire_module_event`, version 2), then
 //!   `so_symbol_all` was appended (version 3); same-build kits guarantee the
 //!   resource queries/pack enablement append the version-4 tail. Every member has the
-//!   exact same struct layout, and all kit members rebuild together on any
-//!   ABI change.
+//!   exact same struct layout. Version 5 appends the generic, opt-in
+//!   post-Main-JNI hook used by package-gated bootstrap adapters. Version 6
+//!   appends process-pinned log-sink registration (`register_log_sink`) and
+//!   active capability membership queries (`has_capability`). Version 7
+//!   appends named service registration/query and exact-path file overlays
+//!   (`register_service`, `query_service`, `register_file_overlay`). All kit
+//!   members rebuild together on any ABI change.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
 use crate::registry::{
-    RudroidAndroidHooks, RudroidAudioPolicy, RudroidModuleLoadedCallback, RudroidUnityProfile,
-    CatalogProviderV0, HostStr,
+    RudroidAfterMainJniCallback, RudroidAndroidHooks, RudroidAudioPolicy,
+    RudroidModuleLoadedCallback, RudroidEngineProfile, CatalogProviderV0, HostStr,
 };
 
-pub const HOST_API_VERSION: u32 = 4;
+pub const HOST_API_VERSION: u32 = 7;
 
 /// Process-pinned bounded asset service. Positive replies report the complete byte length;
 /// zero means unhandled, -1 missing, -2 invalid and -3 too large. No request/output is retained.
@@ -114,7 +119,14 @@ pub type RegisterModuleLoadedFn = extern "C" fn(
     callback: Option<RudroidModuleLoadedCallback>,
     user: *mut c_void,
 ) -> c_int;
-pub type RegisterUnityProfileFn = extern "C" fn(profile: Option<&RudroidUnityProfile>) -> c_int;
+/// Registers a package-selected adapter's post-Main-JNI hook. The callback and
+/// `user` must stay valid for process life; registration is append-only and
+/// runs in registration order after successful Main `JNI_OnLoad`.
+pub type RegisterAfterMainJniFn = extern "C" fn(
+    callback: Option<RudroidAfterMainJniCallback>,
+    user: *mut c_void,
+) -> c_int;
+pub type RegisterEngineProfileFn = extern "C" fn(profile: Option<&RudroidEngineProfile>) -> c_int;
 pub type RegisterAndroidHooksFn = extern "C" fn(hooks: Option<&RudroidAndroidHooks>) -> c_int;
 pub type RegisterAudioPolicyFn = extern "C" fn(policy: Option<&RudroidAudioPolicy>) -> c_int;
 /// Registers the process-wide catalog provider. The threading, reentrancy,
@@ -153,6 +165,23 @@ pub type SharedVmFn = extern "C" fn() -> Option<crate::jni_env::JavaVm>;
 /// capability cannot spoof a mapping. Returns 0 on delivery, non-zero when
 /// the kind is not fireable from capabilities.
 pub type FireModuleEventFn = extern "C" fn(kind: u32) -> c_int;
+/// Register a process-pinned host log sink (first registration wins; 0 on
+/// acceptance, non-zero when null or already registered). The sink must remain
+/// mapped for the process lifetime and accept concurrent calls from any thread.
+pub type RegisterLogSinkFn = extern "C" fn(sink: Option<LogFn>) -> c_int;
+/// Query whether a capability with exact id `id` is part of the validated
+/// loaded kit (1 when present, 0 when absent or invalid).
+pub type HasCapabilityFn = extern "C" fn(id: HostStr<'_>) -> c_int;
+
+/// First registration wins; process-pinned. Returns 0 on success, non-zero on refuse.
+pub type RegisterServiceFn =
+    extern "C" fn(name: HostStr<'static>, service: *const c_void, abi_version: u32) -> c_int;
+/// Version mismatch or missing → null.
+pub type QueryServiceFn =
+    extern "C" fn(name: HostStr<'_>, expected_abi_version: u32) -> *const c_void;
+/// Canonical source path → replacement path (both HostStr). Returns 0/nonzero.
+pub type RegisterFileOverlayFn =
+    extern "C" fn(canonical_source: HostStr<'_>, replacement_path: HostStr<'_>) -> c_int;
 
 /// `Copy` is a plain value copy of the table: function pointers and the
 /// version word. It does NOT extend any callback or library lifetime —
@@ -173,7 +202,7 @@ pub struct HostApiV0 {
     // Ticket 45: shared-runtime registration surface (reference order where
     // applicable).
     pub register_module_loaded: RegisterModuleLoadedFn,
-    pub register_unity_profile: RegisterUnityProfileFn,
+    pub register_engine_profile: RegisterEngineProfileFn,
     pub register_android_hooks: RegisterAndroidHooksFn,
     pub register_audio_policy: RegisterAudioPolicyFn,
     pub register_catalog_provider: RegisterCatalogProviderFn,
@@ -190,6 +219,17 @@ pub struct HostApiV0 {
     /// Version 4: one host-owned resource model for Java, NDK and Bionic paths.
     pub asset_query: AssetQueryFn,
     pub enable_asset_packs: EnableAssetPacksFn,
+    /// Version 5: generic fallible hook after Main `JNI_OnLoad` and before the
+    /// next il2cpp mapping. Title-specific behavior stays in the registrant.
+    pub register_after_main_jni: RegisterAfterMainJniFn,
+    /// Version 6: process-pinned host log sink registration and validated
+    /// capability membership query.
+    pub register_log_sink: RegisterLogSinkFn,
+    pub has_capability: HasCapabilityFn,
+    /// Version 7: named process-pinned services and exact-path file overlays.
+    pub register_service: RegisterServiceFn,
+    pub query_service: QueryServiceFn,
+    pub register_file_overlay: RegisterFileOverlayFn,
 }
 
 impl HostApiV0 {
@@ -238,7 +278,10 @@ impl HostApiV0 {
         extern "C" fn register_module_loaded(_: u32, _: Option<RudroidModuleLoadedCallback>, _: *mut c_void) -> c_int {
             called("register_module_loaded")
         }
-        extern "C" fn register_unity_profile(_: Option<&RudroidUnityProfile>) -> c_int { called("register_unity_profile") }
+        extern "C" fn register_after_main_jni(_: Option<RudroidAfterMainJniCallback>, _: *mut c_void) -> c_int {
+            called("register_after_main_jni")
+        }
+        extern "C" fn register_engine_profile(_: Option<&RudroidEngineProfile>) -> c_int { called("register_engine_profile") }
         extern "C" fn register_android_hooks(_: Option<&RudroidAndroidHooks>) -> c_int { called("register_android_hooks") }
         extern "C" fn register_audio_policy(_: Option<&RudroidAudioPolicy>) -> c_int { called("register_audio_policy") }
         extern "C" fn register_catalog_provider(_: Option<&CatalogProviderV0>) -> c_int {
@@ -256,6 +299,17 @@ impl HostApiV0 {
         extern "C" fn so_symbol_all(_: *mut c_void, _: HostStr<'_>) -> usize { called("so_symbol_all") }
         unsafe extern "C" fn asset_query(_: Option<&crate::android_assets::AssetRequest<'_>>, _: *mut u8, _: u32) -> i32 { called("asset_query") }
         extern "C" fn enable_asset_packs() -> i32 { called("enable_asset_packs") }
+        extern "C" fn register_log_sink(_: Option<LogFn>) -> c_int { called("register_log_sink") }
+        extern "C" fn has_capability(_: HostStr<'_>) -> c_int { called("has_capability") }
+        extern "C" fn register_service(_: HostStr<'static>, _: *const c_void, _: u32) -> c_int {
+            called("register_service")
+        }
+        extern "C" fn query_service(_: HostStr<'_>, _: u32) -> *const c_void {
+            called("query_service")
+        }
+        extern "C" fn register_file_overlay(_: HostStr<'_>, _: HostStr<'_>) -> c_int {
+            called("register_file_overlay")
+        }
         Self {
             abi_version: HOST_API_VERSION,
             getenv,
@@ -268,7 +322,7 @@ impl HostApiV0 {
             so_symbol,
             log,
             register_module_loaded,
-            register_unity_profile,
+            register_engine_profile,
             register_android_hooks,
             register_audio_policy,
             register_catalog_provider,
@@ -280,6 +334,12 @@ impl HostApiV0 {
             so_symbol_all,
             asset_query: AssetQueryFn(asset_query),
             enable_asset_packs,
+            register_after_main_jni,
+            register_log_sink,
+            has_capability,
+            register_service,
+            query_service,
+            register_file_overlay,
         }
     }
 }
@@ -379,14 +439,24 @@ impl HostApiV0 {
         (self.register_module_loaded)(kind as u32, Some(callback), user) == 0
     }
 
+    /// Subscribe to the one post-Main-JNI point. `callback` and `user` remain
+    /// process-pinned; non-zero callback results abort guest bring-up.
+    pub fn on_after_main_jni(
+        &self,
+        callback: RudroidAfterMainJniCallback,
+        user: *mut c_void,
+    ) -> bool {
+        (self.register_after_main_jni)(Some(callback), user) == 0
+    }
+
     /// Register the Android runtime hooks (the host copies the struct).
     pub fn register_hooks(&self, hooks: &RudroidAndroidHooks) -> bool {
         (self.register_android_hooks)(Some(hooks)) == 0
     }
 
-    /// Register the Unity engine profile (the host copies the struct).
-    pub fn register_profile(&self, profile: &RudroidUnityProfile) -> bool {
-        (self.register_unity_profile)(Some(profile)) == 0
+    /// Register the engine profile (the host copies the struct).
+    pub fn register_profile(&self, profile: &RudroidEngineProfile) -> bool {
+        (self.register_engine_profile)(Some(profile)) == 0
     }
 
     /// Register the platform audio policy (the host copies the struct).
@@ -427,6 +497,107 @@ impl HostApiV0 {
         );
         (hit == 1).then_some(value != 0)
     }
+
+    /// Register a process-pinned host log sink (first registration wins).
+    pub fn register_log(&self, sink: LogFn) -> bool {
+        (self.register_log_sink)(Some(sink)) == 0
+    }
+
+    /// True when the validated kit loaded a capability with exact id `id`.
+    pub fn has_capability(&self, id: &CStr) -> bool {
+        (self.has_capability)(HostStr::new(id)) == 1
+    }
+
+    /// Process environment value from the host `getenv` entry, if present and non-empty.
+    pub fn env_cstr(&self, name: &CStr) -> Option<&CStr> {
+        let ptr = (self.getenv)(HostStr::new(name));
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: Host getenv returns null or a process-pinned NUL-terminated C string.
+        let text = unsafe { CStr::from_ptr(ptr) };
+        (!text.to_bytes().is_empty()).then_some(text)
+    }
+
+    /// First-wins named service registration. `name` and `service` stay process-pinned.
+    pub fn register_named_service(
+        &self,
+        name: &'static CStr,
+        service: *const c_void,
+        abi_version: u32,
+    ) -> bool {
+        (self.register_service)(HostStr::new(name), service, abi_version) == 0
+    }
+
+    /// Lookup a named service; null when missing or ABI version mismatches.
+    pub fn query_named_service(&self, name: &CStr, expected_abi_version: u32) -> *const c_void {
+        (self.query_service)(HostStr::new(name), expected_abi_version)
+    }
+
+    /// Typed first-wins registration for a [`ServiceContract`] implementor.
+    pub fn register_service_typed<S: ServiceContract>(&self, service: &'static S) -> bool {
+        self.register_named_service(
+            S::NAME,
+            std::ptr::from_ref(service).cast(),
+            S::ABI_VERSION,
+        )
+    }
+
+    /// Typed lookup for a [`ServiceContract`] implementor.
+    pub fn query_service_typed<S: ServiceContract>(&self) -> Option<&'static S> {
+        let ptr = self.query_named_service(S::NAME, S::ABI_VERSION);
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: only ServiceContract implementors may register under NAME at
+        // ABI_VERSION; the pointer stays process-pinned for the kit lifetime.
+        Some(unsafe { &*ptr.cast::<S>() })
+    }
+
+    /// Runtime string override (first write wins) for `package.mainIntentBundle.*`.
+    /// False when the key is outside that scope, already overridden, or invalid.
+    pub fn set_config_string(&self, key: &CStr, value: &CStr) -> bool {
+        (self.config_set_string)(HostStr::new(key), HostStr::new(value)) == 1
+    }
+
+    /// First-wins exact-path file overlay. Both paths are copied by the host.
+    pub fn register_file_overlay(&self, canonical: &CStr, replacement: &CStr) -> bool {
+        (self.register_file_overlay)(HostStr::new(canonical), HostStr::new(replacement)) == 0
+    }
+
+    /// Authoritative serialized Host Config TOML document, if one is installed.
+    pub fn config_toml(&self) -> Option<&'static str> {
+        let svc = self.query_service_typed::<HostConfigTomlV1>()?;
+        (svc.toml_utf8)().to_cstr()?.to_str().ok()
+    }
+}
+
+/// Process-pinned named service with a stable ABI version.
+///
+/// # Safety
+/// Implementors guarantee `NAME`/`ABI_VERSION` uniquely identify `Self`'s
+/// layout for the process lifetime of every registered pointer.
+pub unsafe trait ServiceContract: 'static + Sync {
+    const NAME: &'static CStr;
+    const ABI_VERSION: u32;
+}
+
+/// Host-provided read-only TOML document service for schema-level validation.
+pub const HOST_CONFIG_TOML_SERVICE_NAME: &CStr = c"rudroid.host.config_toml.v1";
+pub const HOST_CONFIG_TOML_SERVICE_ABI: u32 = 1;
+
+#[repr(C)]
+pub struct HostConfigTomlV1 {
+    pub abi_version: u32,
+    /// Process-pinned NUL-terminated UTF-8 TOML text, or null when no config is installed.
+    pub toml_utf8: extern "C" fn() -> HostStr<'static>,
+}
+
+// SAFETY: `HOST_CONFIG_TOML_SERVICE_NAME` at `HOST_CONFIG_TOML_SERVICE_ABI`
+// uniquely identifies `HostConfigTomlV1` across every kit member.
+unsafe impl ServiceContract for HostConfigTomlV1 {
+    const NAME: &'static CStr = HOST_CONFIG_TOML_SERVICE_NAME;
+    const ABI_VERSION: u32 = HOST_CONFIG_TOML_SERVICE_ABI;
 }
 
 #[cfg(test)]

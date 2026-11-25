@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use rudroid_common::handles::HandleTable;
-use rudroid_common::il2cpp::{Il2cpp, Image, Method, StaticI32Method};
+use rudroid_unity_common::il2cpp::{Il2cpp, Image, Method, StaticI32Method};
 use rudroid_common::registry::RudroidModuleEvent;
 use rudroid_common::{package_gate, Kind, ModuleKind};
 use rudroid_common::host_api::{HostApiV0, HOST_API_VERSION};
@@ -58,7 +58,7 @@ use rudroid_host_config::HostConfig;
 use rudroid_common::arm64_detour::{self as arm64, Original};
 
 pub use arm64::HookShape;
-use rudroid_common::gamepatch_support::install_detour as detour;
+use rudroid_unity_common::gamepatch_support::install_detour as detour;
 
 // The hooks install on `Il2cppReady`, which only il2cpp_patch fires.
 rudroid_common::declare_descriptor!(
@@ -91,55 +91,21 @@ pub struct ViewportFeatures {
 }
 
 impl ViewportFeatures {
-    fn from_pairs(pairs: [(bool, bool); 4]) -> ViewportFeatures {
-        ViewportFeatures {
-            debug: pairs[0].0,
-            force_full_viewport: pairs[1].0,
-            tk2d_width_safe: pairs[2].0,
-            ui_orthographic_width_safe: pairs[3].0,
+    fn read(config: &impl rudroid_common::config_reader::ConfigReader) -> Self {
+        let flag = |name: &str, default| {
+            let legacy = config.boolean(&format!("hk_viewport.{name}"), default);
+            config.boolean(&format!("game_patches.hollow_knight_viewport.{name}"), legacy)
+        };
+        Self {
+            debug: flag("debug", false),
+            force_full_viewport: flag("force_full_viewport", true),
+            tk2d_width_safe: flag("tk2d_width_safe", true),
+            ui_orthographic_width_safe: flag("ui_orthographic_width_safe", true),
         }
     }
 
-    /// In-process read (tests). The reference chain through the shared
-    /// override primitive (ticket 87 Phase C): the new
-    /// `game_patches.hollow_knight_viewport.*` key wins, the legacy
-    /// `hk_viewport.*` key is the fallback, then the default. A
-    /// present-but-non-boolean value falls through exactly like a missing
-    /// key (`get_bool_opt` = the chain-through condition of `get_bool`).
-    pub fn from_config(config: &HostConfig) -> ViewportFeatures {
-        let read = |name: &str, fallback: bool| {
-            rudroid_common::gamepatch_support::override_setting(
-                |key| config.get_bool_opt(key),
-                &format!("game_patches.hollow_knight_viewport.{name}"),
-                &format!("hk_viewport.{name}"),
-                fallback,
-            )
-        };
-        ViewportFeatures::from_pairs([
-            (read("debug", false), false),
-            (read("force_full_viewport", true), false),
-            (read("tk2d_width_safe", true), false),
-            (read("ui_orthographic_width_safe", true), false),
-        ])
-    }
-
-    /// Host-API-getter read (the C++ consumption path).
-    pub fn from_host_api(api: &HostApiV0) -> ViewportFeatures {
-        let read = |name: &str, fallback: bool| {
-            let get = |key: String, fallback: bool| match CString::new(key) {
-                Ok(key) => api.config_bool(&key, fallback),
-                Err(_) => fallback,
-            };
-            let legacy = get(format!("hk_viewport.{name}"), fallback);
-            get(format!("game_patches.hollow_knight_viewport.{name}"), legacy)
-        };
-        ViewportFeatures::from_pairs([
-            (read("debug", false), false),
-            (read("force_full_viewport", true), false),
-            (read("tk2d_width_safe", true), false),
-            (read("ui_orthographic_width_safe", true), false),
-        ])
-    }
+    pub fn from_config(config: &HostConfig) -> Self { Self::read(config) }
+    pub fn from_host_api(api: &HostApiV0) -> Self { Self::read(api) }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +250,7 @@ pub fn plan(features: &ViewportFeatures) -> Vec<PlanEntry> {
 }
 
 // ---------------------------------------------------------------------------
-// Guest IL2CPP lookups over the shared `rudroid_common::il2cpp` binding
+// Guest IL2CPP lookups over the shared `rudroid_unity_common::il2cpp` binding
 // (reference init resolves exactly these eight exports and disables the
 // patch when one is missing).
 // ---------------------------------------------------------------------------
@@ -365,7 +331,7 @@ fn field_offset(api: &Il2cpp, image: Image, ns: &str, class: &str, field: &str) 
 // ---------------------------------------------------------------------------
 
 /// One install outcome.
-pub use rudroid_common::gamepatch_support::InstallEvent;
+pub use rudroid_unity_common::gamepatch_support::InstallEvent;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // Hook bodies must never panic: a poisoned lock still hands out the data.
@@ -459,9 +425,13 @@ impl Tk2dSlot {
 
 /// Host table snapshot (reference `g_api->log`).
 static HOST_LOG: Mutex<Option<HostApiV0>> = Mutex::new(None);
-/// Bounded log counters (reference `static int count` guards).
-static LOG_COUNTS: std::sync::LazyLock<Mutex<std::collections::HashMap<&'static str, usize>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+// Each native callback has its own process-wide counter, shared across threads.
+macro_rules! log_counter {
+    () => {{
+        static COUNT: AtomicUsize = AtomicUsize::new(0);
+        &COUNT
+    }};
+}
 
 fn hk_log_raw(message: &str) {
     let Some(api) = *lock(&HOST_LOG) else {
@@ -475,12 +445,10 @@ fn hk_log_raw(message: &str) {
 }
 
 /// Log a hook line at most `limit` times (reference `count++ < N` guards).
-fn bounded_log(key: &'static str, limit: usize, message: impl FnOnce() -> String) {
-    let mut counts = LOG_COUNTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let count = counts.entry(key).or_insert(0);
-    if *count < limit {
-        *count += 1;
-        drop(counts);
+fn bounded_log(count: &AtomicUsize, limit: usize, message: impl FnOnce() -> String) {
+    if count.load(Ordering::Relaxed) < limit && count.fetch_update(
+        Ordering::Relaxed, Ordering::Relaxed, |n| (n < limit).then(|| n + 1)
+    ).is_ok() {
         hk_log_raw(&message());
     }
 }
@@ -591,7 +559,7 @@ fn remember_tk2d_base(
 /// # Safety
 /// `tk2d` and its settings stay live and stationary for every field access;
 /// the caller runs on the Unity thread without concurrent field mutation.
-unsafe fn apply_tk2d_width_safe(tk2d: *mut c_void, tag: &'static str) {
+unsafe fn apply_tk2d_width_safe(tk2d: *mut c_void, (tag, count): (&'static str, &AtomicUsize)) {
     if !TK2D_SAFE.load(Ordering::Relaxed) || tk2d.is_null() {
         return;
     }
@@ -626,7 +594,7 @@ unsafe fn apply_tk2d_width_safe(tk2d: *mut c_void, tag: &'static str) {
             write_f32(tk2d as usize + offsets.zoom, base.zoom_patched);
         }
         bounded_log(
-            tag,
+            count,
             96,
             || format!(
                 "{tag} tk2d width-safe ortho {ortho:.4}(base {ortho_base:.4})->{ortho_patched:.4}                  ppm {ppm:.4}(base {ppm_base:.4})->{ppm_patched:.4} zoom {zoom:.4}(base {zoom_base:.4})->{zoom_patched:.4} scale={scale:.4}",
@@ -646,7 +614,7 @@ unsafe fn apply_tk2d_width_safe(tk2d: *mut c_void, tag: &'static str) {
 ///
 /// # Safety
 /// `camera` must point at a live guest Camera instance on the Unity thread.
-unsafe fn apply_camera_fixups(camera: *mut c_void, tag: &'static str) {
+unsafe fn apply_camera_fixups(camera: *mut c_void, (tag, count): (&'static str, &AtomicUsize)) {
     if camera.is_null() {
         return;
     }
@@ -660,7 +628,7 @@ unsafe fn apply_camera_fixups(camera: *mut c_void, tag: &'static str) {
                 let mi = SET_RECT_MI.load(Ordering::Relaxed) as *mut c_void;
                 let mut rect = GuestRect::FULL;
                 set_rect(camera, &mut rect, mi);
-                bounded_log(tag, 32, || format!("{tag} full camera rect applied camera={camera:p}"));
+                bounded_log(count, 32, || format!("{tag} full camera rect applied camera={camera:p}"));
             }
         }
         if let (true, Some(calls), Some(set)) = (UI_ORHO_SAFE.load(Ordering::Relaxed), ortho, SET_ORTHO_ORIG.get()) {
@@ -669,7 +637,7 @@ unsafe fn apply_camera_fixups(camera: *mut c_void, tag: &'static str) {
                 let current = (calls.get)(camera, calls.get_mi as *mut c_void);
                 if let Some(patched) = remember_ortho(camera as usize, current, scale) {
                     set(camera, patched, calls.set_mi as *mut c_void);
-                    bounded_log("ui_ortho_fixup", 64, || format!("{tag} UI ortho width-safe {current:.4} -> {patched:.4} scale={scale:.4}"));
+                    bounded_log(log_counter!(), 64, || format!("{tag} UI ortho width-safe {current:.4} -> {patched:.4} scale={scale:.4}"));
                 }
             }
         }
@@ -677,6 +645,10 @@ unsafe fn apply_camera_fixups(camera: *mut c_void, tag: &'static str) {
 }
 
 fn remember_ortho(camera: usize, current: f32, scale: f32) -> Option<f32> {
+    cache_ortho(camera, current, scale, true)
+}
+
+fn cache_ortho(camera: usize, current: f32, scale: f32, readback: bool) -> Option<f32> {
     if camera == 0 || !current.is_finite() || current <= 0.0 || !scale.is_finite() || scale <= 1.0 {
         return None;
     }
@@ -684,7 +656,7 @@ fn remember_ortho(camera: usize, current: f32, scale: f32) -> Option<f32> {
     let index = slots.iter().position(|slot| slot.0 == camera)
         .or_else(|| slots.iter().position(|slot| slot.0 == 0))?;
     let slot = &mut slots[index];
-    let base = if slot.0 == camera && looks_like_current_patch(current, slot.2) { slot.1 } else { current };
+    let base = if readback && slot.0 == camera && looks_like_current_patch(current, slot.2) { slot.1 } else { current };
     let patched = base * scale;
     if !patched.is_finite() { return None; }
     *slot = (camera, base, patched);
@@ -696,7 +668,7 @@ fn remember_ortho(camera: usize, current: f32, scale: f32) -> Option<f32> {
 /// # Safety
 /// `owner` and its metadata-checked camera fields stay live and stationary
 /// throughout the Unity-thread callback, including all nested native calls.
-unsafe fn apply_owner_fixups(owner: *mut c_void, offsets: Option<CameraOffsets>, tag: &'static str) {
+unsafe fn apply_owner_fixups(owner: *mut c_void, offsets: Option<CameraOffsets>, tag: (&'static str, &AtomicUsize)) {
     let (false, Some(offsets)) = (owner.is_null(), offsets) else { return; };
     // SAFETY: caller retains the live owner and its camera fields for this
     // complete callback; offsets came from exact class/type metadata.
@@ -745,7 +717,7 @@ unsafe extern "C-unwind" fn set_rect_injected_hook(self_: *mut c_void, rect: *mu
         // SAFETY: as above.
         unsafe { std::ptr::write_unaligned(rect, GuestRect::FULL) };
         bounded_log(
-            "set_rect",
+            log_counter!(),
             96,
             || format!(
                 "Camera.set_rect_Injected rect {:.3},{:.3} {:.3}x{:.3} -> full",
@@ -768,9 +740,9 @@ unsafe extern "C-unwind" fn set_orthographic_size_hook(self_: *mut c_void, value
     } else {
         1.0
     };
-    let patched = value * scale;
+    let patched = cache_ortho(self_ as usize, value, scale, false).unwrap_or(value);
     bounded_log(
-        "set_ortho",
+        log_counter!(),
         96,
         || format!(
             "Camera.set_orthographicSize {value:.4} -> {patched:.4} scale={scale:.4}"
@@ -786,7 +758,7 @@ unsafe extern "C-unwind" fn set_orthographic_size_hook(self_: *mut c_void, value
 /// BEFORE the original reads the settings.
 unsafe extern "C-unwind" fn tk2d_update_camera_matrix_hook(self_: *mut c_void, mi: *mut c_void) {
     // SAFETY: live guest tk2dCamera.
-    unsafe { apply_tk2d_width_safe(self_, "tk2dCamera.UpdateCameraMatrix") };
+    unsafe { apply_tk2d_width_safe(self_, ("tk2dCamera.UpdateCameraMatrix", log_counter!())) };
     if let Some(orig) = TK2D_MATRIX_ORIG.get() {
         // SAFETY: the trampoline replays the saved prologue.
         unsafe { orig(self_, mi) };
@@ -804,9 +776,9 @@ unsafe extern "C-unwind" fn auto_scale_hook(self_: *mut c_void, mi: *mut c_void)
     };
     let offsets = *lock(&FORCE_ASPECT_OFFSETS);
     // SAFETY: the native callback retains its live owner and referenced cameras.
-    unsafe { apply_owner_fixups(self_, offsets, "ForceCameraAspect.AutoScale") };
+    unsafe { apply_owner_fixups(self_, offsets, ("ForceCameraAspect.AutoScale", log_counter!())) };
     bounded_log(
-        "auto_scale",
+        log_counter!(),
         32,
         || format!("ForceCameraAspect.AutoScaleViewport -> {ret:.4}"),
     );
@@ -820,7 +792,7 @@ unsafe extern "C-unwind" fn auto_scale_hook(self_: *mut c_void, mi: *mut c_void)
 /// Preserve the original overscan value, then correct the owner's cameras.
 unsafe extern "C-unwind" fn set_overscan_viewport_hook(self_: *mut c_void, adjustment: f32, mi: *mut c_void) {
     bounded_log(
-        "set_overscan_viewport",
+        log_counter!(),
         32,
         || format!(
             "ForceCameraAspect.SetOverscanViewport adjustment={adjustment:.4} self={:p}",
@@ -832,7 +804,7 @@ unsafe extern "C-unwind" fn set_overscan_viewport_hook(self_: *mut c_void, adjus
         unsafe {
             orig(self_, adjustment, mi);
             let offsets = *lock(&FORCE_ASPECT_OFFSETS);
-            apply_owner_fixups(self_, offsets, "ForceCameraAspect.SetOverscanViewport");
+            apply_owner_fixups(self_, offsets, ("ForceCameraAspect.SetOverscanViewport", log_counter!()));
         };
     }
 }
@@ -840,7 +812,7 @@ unsafe extern "C-unwind" fn set_overscan_viewport_hook(self_: *mut c_void, adjus
 /// Preserve the original overscan value, then correct HUD/main/tk2d cameras.
 unsafe extern "C-unwind" fn set_overscan_hook(self_: *mut c_void, value: f32, mi: *mut c_void) {
     bounded_log(
-        "set_overscan",
+        log_counter!(),
         32,
         || format!("GameCameras.SetOverscan value={value:.4} self={:p}", self_),
     );
@@ -849,7 +821,7 @@ unsafe extern "C-unwind" fn set_overscan_hook(self_: *mut c_void, value: f32, mi
         unsafe {
             orig(self_, value, mi);
             let offsets = *lock(&GAME_CAMERA_OFFSETS);
-            apply_owner_fixups(self_, offsets, "GameCameras.SetOverscan");
+            apply_owner_fixups(self_, offsets, ("GameCameras.SetOverscan", log_counter!()));
         };
     }
 }

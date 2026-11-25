@@ -1,6 +1,7 @@
 //! INPUT:  active pinned GLES driver, immutable shader policy and caller-owned GL arguments
 //! OUTPUT:  source rewrites and context-specific disabled-program draw suppression
 //! POS:    native shader boundary; no guest strings or executable pointers outlive their call
+#![deny(unsafe_op_in_unsafe_fn)]
 use super::{active, Graphics};
 use std::{
     cell::Cell,
@@ -107,20 +108,20 @@ pub(super) unsafe fn refresh_binding(g: &Graphics, install: Option<u32>) {
     unsafe {
         let context = (g.driver.current_context)() as usize;
         if context == 0 {
-            BINDING.with(|b| b.set((false, EPOCH.load(std::sync::atomic::Ordering::Acquire))));
+            let _ = BINDING.try_with(|b| b.set((false, EPOCH.load(std::sync::atomic::Ordering::Acquire))));
             return;
         }
         let addr = g.native_address(c"glGetIntegerv");
         if addr == 0 {
             return;
         }
-        let q: extern "C" fn(u32, *mut i32) = std::mem::transmute(addr);
+        let q: unsafe extern "C" fn(u32, *mut i32) = std::mem::transmute(addr);
         let mut program = 0;
         q(0x8b8d, &mut program);
         let epoch = EPOCH.load(std::sync::atomic::Ordering::Acquire);
         let skip =
             with_state(|s| s.binding(context, program as u32, install == Some(program as u32)));
-        BINDING.with(|b| b.set((skip, epoch)));
+        let _ = BINDING.try_with(|b| b.set((skip, epoch)));
     }
 }
 /// # Safety
@@ -138,7 +139,7 @@ unsafe extern "C" fn shader_source(
     let call = native!(
         g,
         c"glShaderSource",
-        extern "C" fn(u32, i32, *const *const c_char, *const i32)
+        unsafe extern "C" fn(u32, i32, *const *const c_char, *const i32)
     );
     // SAFETY: caller's GL pointer contract. Bounds cap allocations; native glShaderSource
     // copies the owned replacement synchronously before its backing Vec is dropped.
@@ -184,7 +185,7 @@ unsafe extern "C" fn shader_source(
             call(shader, count, strings, lengths);
             return;
         }
-        let q: extern "C" fn(u32, u32, *mut i32) = std::mem::transmute(address);
+        let q: unsafe extern "C" fn(u32, u32, *mut i32) = std::mem::transmute(address);
         let mut kind = 0;
         q(shader, 0x8b4f, &mut kind);
         if let Some(rewritten) = super::super::shader_policy::policy().rewrite(kind as u32, source)
@@ -207,21 +208,24 @@ unsafe extern "C" fn link_program(program: u32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glLinkProgram", extern "C" fn(u32));
+    let call = native!(g, c"glLinkProgram", unsafe extern "C" fn(u32));
     let changing = begin_change();
-    call(program);
-    let q = native!(g, c"glGetProgramiv", extern "C" fn(u32, u32, *mut i32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(program) };
+    let q = native!(g, c"glGetProgramiv", unsafe extern "C" fn(u32, u32, *mut i32));
     let mut linked = 0;
-    q(program, 0x8b82, &mut linked);
+    // SAFETY: The query writes to the local output of the declared GLES type.
+    unsafe { q(program, 0x8b82, &mut linked) };
     if linked != 0 {
         let attached = native!(
             g,
             c"glGetAttachedShaders",
-            extern "C" fn(u32, i32, *mut i32, *mut u32)
+            unsafe extern "C" fn(u32, i32, *mut i32, *mut u32)
         );
         let mut shaders = [0u32; 32];
         let mut written = 0;
-        attached(program, 32, &mut written, shaders.as_mut_ptr());
+        // SAFETY: The query writes to the local output of the declared GLES type.
+        unsafe { attached(program, 32, &mut written, shaders.as_mut_ptr()) };
         // SAFETY: successful link/current context; native output is bounded by the array capacity.
         unsafe {
             let context = (g.driver.current_context)() as usize;
@@ -238,8 +242,9 @@ unsafe extern "C" fn use_program(program: u32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glUseProgram", extern "C" fn(u32));
-    call(program); // SAFETY: native binding completed, current context remains owned by this thread.
+    let call = native!(g, c"glUseProgram", unsafe extern "C" fn(u32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(program) }; // SAFETY: native binding completed, current context remains owned by this thread.
     unsafe {
         refresh_binding(&g, Some(program));
     }
@@ -251,8 +256,9 @@ unsafe extern "C" fn delete_program(program: u32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glDeleteProgram", extern "C" fn(u32));
-    call(program);
+    let call = native!(g, c"glDeleteProgram", unsafe extern "C" fn(u32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(program) };
     // SAFETY: current-context query is valid; native deletion completed before metadata retirement.
     unsafe {
         with_state(|s| s.delete_program((g.driver.current_context)() as usize, program));
@@ -267,8 +273,9 @@ unsafe extern "C" fn draw_arrays(mode: u32, first: i32, count: i32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glDrawArrays", extern "C" fn(u32, i32, i32));
-    call(mode, first, count);
+    let call = native!(g, c"glDrawArrays", unsafe extern "C" fn(u32, i32, i32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(mode, first, count) };
 }
 /// # Safety
 /// Native element buffer/client indices remain readable for the native draw.
@@ -282,9 +289,10 @@ unsafe extern "C" fn draw_elements(mode: u32, count: i32, kind: u32, indices: *c
     let call = native!(
         g,
         c"glDrawElements",
-        extern "C" fn(u32, i32, u32, *const c_void)
+        unsafe extern "C" fn(u32, i32, u32, *const c_void)
     );
-    call(mode, count, kind, indices);
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(mode, count, kind, indices) };
 }
 /// # Safety
 /// Exact native instanced array-draw contract and current context.
@@ -298,9 +306,10 @@ unsafe extern "C" fn draw_arrays_instanced(mode: u32, first: i32, count: i32, in
     let call = native!(
         g,
         c"glDrawArraysInstanced",
-        extern "C" fn(u32, i32, i32, i32)
+        unsafe extern "C" fn(u32, i32, i32, i32)
     );
-    call(mode, first, count, instances);
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(mode, first, count, instances) };
 }
 /// # Safety
 /// Exact native instanced element-draw contract and current context.
@@ -320,9 +329,10 @@ unsafe extern "C" fn draw_elements_instanced(
     let call = native!(
         g,
         c"glDrawElementsInstanced",
-        extern "C" fn(u32, i32, u32, *const c_void, i32)
+        unsafe extern "C" fn(u32, i32, u32, *const c_void, i32)
     );
-    call(mode, count, kind, indices, instances);
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(mode, count, kind, indices, instances) };
 }
 
 /// # Safety
@@ -331,11 +341,13 @@ unsafe extern "C" fn compile_shader(shader: u32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glCompileShader", extern "C" fn(u32));
-    call(shader);
-    let q = native!(g, c"glGetShaderiv", extern "C" fn(u32, u32, *mut i32));
+    let call = native!(g, c"glCompileShader", unsafe extern "C" fn(u32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(shader) };
+    let q = native!(g, c"glGetShaderiv", unsafe extern "C" fn(u32, u32, *mut i32));
     let mut compiled = 0;
-    q(shader, 0x8b81, &mut compiled);
+    // SAFETY: The query writes to the local output of the declared GLES type.
+    unsafe { q(shader, 0x8b81, &mut compiled) };
     if compiled != 0 {
         // SAFETY: current native context remains live across synchronous compile.
         unsafe {
@@ -349,10 +361,12 @@ unsafe extern "C" fn delete_shader(shader: u32) {
     let Some(g) = active() else {
         return;
     };
-    let call = native!(g, c"glDeleteShader", extern "C" fn(u32));
-    call(shader);
-    let exists = native!(g, c"glIsShader", extern "C" fn(u32) -> u8);
-    if exists(shader) == 0 {
+    let call = native!(g, c"glDeleteShader", unsafe extern "C" fn(u32));
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(shader) };
+    let exists = native!(g, c"glIsShader", unsafe extern "C" fn(u32) -> u8);
+    // SAFETY: The session pins this driver entry and the caller owns the current context.
+    if unsafe { exists(shader) } == 0 {
         // SAFETY: current context; driver confirms the shader name has been reclaimed.
         unsafe {
             with_state(|s| s.forget_shader((g.driver.current_context)() as usize, shader));
@@ -374,9 +388,10 @@ unsafe extern "C" fn shader_binary(
     let call = native!(
         g,
         c"glShaderBinary",
-        extern "C" fn(i32, *const u32, u32, *const c_void, i32)
+        unsafe extern "C" fn(i32, *const u32, u32, *const c_void, i32)
     );
-    call(count, shaders, format, binary, length);
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    unsafe { call(count, shaders, format, binary, length) };
     // SAFETY: caller's readable name array; bounded bookkeeping never reads beyond count.
     unsafe {
         if (1..=4096).contains(&count) && !shaders.is_null() {
@@ -392,9 +407,10 @@ unsafe extern "C" fn shader_binary(
 /// # Safety
 /// Call only after native ProgramBinary; successful binary loads are never source-derived skips.
 pub(super) unsafe fn program_binary_loaded(g: &Graphics, program: u32) {
-    let q = native!(g, c"glGetProgramiv", extern "C" fn(u32, u32, *mut i32));
+    let q = native!(g, c"glGetProgramiv", unsafe extern "C" fn(u32, u32, *mut i32));
     let mut linked = 0;
-    q(program, 0x8b82, &mut linked);
+    // SAFETY: The query writes to the local output of the declared GLES type.
+    unsafe { q(program, 0x8b82, &mut linked) };
     if linked != 0 {
         // SAFETY: current context and successful native binary operation.
         unsafe {

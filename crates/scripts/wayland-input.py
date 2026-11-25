@@ -29,6 +29,31 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def no_link_ancestors(path):
+    for item in (path.absolute(), *path.absolute().parents):
+        if item.is_symlink():
+            raise ValueError("cache path contains a symlink: " + str(item))
+
+
+def atomic_write_bytes(path, data):
+    no_link_ancestors(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".tmp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path, text):
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
 def verified_sdl(archive, destination, expected=SDL_SHA):
     data = archive.read_bytes()
     if sha(data) != expected:
@@ -98,53 +123,63 @@ def loader_files(data):
 
 
 def prepare(cache):
+    no_link_ancestors(cache)
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / f"SDL2-{SDL_VERSION}.tar.gz"
+    no_link_ancestors(archive)
     if not archive.exists():
         with urllib.request.urlopen(SDL_URL, timeout=30) as response:
-            data = response.read(16 * 1024 * 1024)
-        if sha(data) != SDL_SHA:
+            data = response.read(16 * 1024 * 1024 + 1)
+        if len(data) > 16 * 1024 * 1024 or sha(data) != SDL_SHA:
             raise ValueError("SDL source archive checksum mismatch")
-        archive.write_bytes(data)
+        atomic_write_bytes(archive, data)
     sdl = verified_sdl(archive, cache / f"sdl-{SDL_VERSION}")
     archive = cache / "vulkan-loader.deb"
+    no_link_ancestors(archive)
     if not archive.exists():
         with urllib.request.urlopen(LOADER_URL, timeout=30) as response:
-            data = response.read(4 * 1024 * 1024)
+            data = response.read(4 * 1024 * 1024 + 1)
+        if len(data) > 4 * 1024 * 1024:
+            raise ValueError("Vulkan loader package exceeds size limit")
         loader_files(data)
-        archive.write_bytes(data)
+        atomic_write_bytes(archive, data)
     files = loader_files(archive.read_bytes())
     destination = cache / "loader"
+    no_link_ancestors(destination)
     destination.mkdir(exist_ok=True)
     for name, data in files.items():
         path = destination / name
+        no_link_ancestors(path)
         if path.exists() and path.read_bytes() != data:
             raise ValueError("cached Vulkan loader changed: " + name)
-        path.write_bytes(data)
+        atomic_write_bytes(path, data)
     receipt = {"sdl": sdl, "loader": {"url": LOADER_URL, "version": "1.3.224.0-1~bpo11+1",
                "package_sha256": LOADER_SHA, "files": {k: sha(v) for k, v in files.items()}}}
-    (cache / "sources.json").write_text(json.dumps(receipt, sort_keys=True, indent=2) + "\n")
+    atomic_write_text(cache / "sources.json", json.dumps(receipt, sort_keys=True, indent=2) + "\n")
     print("Optional Wayland client inputs verified (SDL zlib; Vulkan loader Apache-2.0).")
 
 
 def package(runtime):
     # These optional external libraries have a separate target ABI requirement.
     # The core kit's independent 2.28 gate is not relaxed.
+    no_link_ancestors(runtime)
     libraries = [runtime / name for name in ["libSDL2-2.0.so.0", "libvulkan.so.1"]]
     if any(not p.is_file() or p.is_symlink() for p in libraries):
         raise ValueError("optional client build is incomplete")
     audit = runtime / "linux-abi.json"
+    no_link_ancestors(audit)
     subprocess.run([sys.executable, str(Path(__file__).with_name("linux_abi.py")),
                     *[arg for p in libraries for arg in ["--file", str(p)]],
                     "--max-glibc", "2.33", "--output", str(audit)], check=True)
     requirements = json.loads(audit.read_text())
-    versions = [m["glibc_max_required"] for m in requirements["members"].values()]
-    minimum = max(versions, key=lambda s: tuple(map(int, s.split("."))))
+    versions = [m["glibc_max_required"] for m in requirements["members"].values() if m.get("glibc_max_required")]
+    minimum = max(versions, key=lambda s: tuple(map(int, s.split(".")))) if versions else "none"
     manifest = {"purpose": "optional ARM64 glibc Wayland clients; existing system GPU driver",
                 "minimum_glibc": minimum, "sdl_version": SDL_VERSION, "vulkan_loader_version": "1.3.224",
                 "files": {p.name: {"size": p.stat().st_size, "sha256": sha(p.read_bytes())}
-                          for p in sorted(runtime.iterdir()) if p.is_file() and p.name != "manifest.json"}}
-    (runtime / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+                          for p in sorted(runtime.iterdir())
+                          if p.is_file() and not p.is_symlink() and p.name != "manifest.json"}}
+    atomic_write_text(runtime / "manifest.json", json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     print("Optional Wayland client bundle audited; minimum glibc=" + minimum)
 
 

@@ -3,7 +3,7 @@
 > Plain library with the Reply Catalog blob codec, the read-only `Catalog` query model and the in-repo source table.
 
 ## Role
-Plain library, no descriptor; package `rudroid-reply-catalog-format`, an rlib with no dependencies. `reply_catalog` (also as build-dependency), `android_jni_vm` and `android_base` each link their own copy; runtime queries still go through the `reply_catalog` provider.
+Plain library, no descriptor; package `rudroid-reply-catalog-format`, an rlib with no dependencies. Only `reply_catalog` links it (also as build-dependency). Other capabilities query replies through the Host API catalog provider, not this rlib.
 
 ## Design
 - Blob v1 (little-endian): `BDRC` header with version, entry count and string-pool size; the UTF-8 pool; 44-byte records (key offsets, value kind 0 bool/1 int/2 str, 16-byte payload).

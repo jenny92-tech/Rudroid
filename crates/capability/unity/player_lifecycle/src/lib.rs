@@ -9,9 +9,10 @@
 //! mirror the read-only reference (`plugins/unity_*` + `unity_engine_runner`):
 //!
 //! 1. [`register_jni`] — validates the spec, then registers the
-//!    `RudroidUnityProfile` (prepare/bootstrap/run) with the shared runtime
-//!    registry at the reference "early JNI phase". Requires the shared JNI
-//!    session (reference: `api->jni_runtime`).
+//!    `RudroidEngineProfile` (validate_config/build_guest_plan/prepare/
+//!    bootstrap/run) with the shared runtime registry at the reference
+//!    "early JNI phase". Requires the shared JNI session
+//!    (reference: `api->jni_runtime`).
 //! 2. `prepare(&HostApiV0)` — engine-side setup: player class lookup,
 //!    engine Java services, player callbacks, shared player/context/Surface
 //!    objects, config reads (`unity.context_type`, `unity.render_sleep_us`
@@ -32,7 +33,19 @@
 //! branches. Each profile cdylib links its own copy of this library, so the
 //! statics here are per profile and never a cross-library service.
 
+mod guest_plan;
 mod lifecycle;
+mod mono_service;
+mod player_thread;
+// Production kit audits reject images compiled with private probes.
+#[cfg(feature = "diag-probes")]
+#[no_mangle]
+pub extern "C" fn rudroid_unity_diag_probes_marker() {}
+
+#[cfg(feature = "diag-probes")]
+mod phase_timing;
+#[cfg(feature = "diag-probes")]
+mod render_schedstat;
 pub mod spy;
 
 use std::ffi::{c_int, CStr};
@@ -45,7 +58,8 @@ mod soft_input;
 
 use rudroid_common::host_api::{HostApiV0, HOST_API_VERSION};
 use rudroid_common::jni_env::JniEnv;
-use rudroid_common::registry::{RudroidUnityProfile, HostStr, RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG};
+use rudroid_common::registry::{RudroidEngineProfile, HostStr};
+use rudroid_unity_common::RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG;
 
 /// The two initJni shapes the reference specs use.
 pub const INIT_JNI_CONTEXT: &str = "(Landroid/content/Context;)V";
@@ -217,19 +231,16 @@ pub fn register_jni<P: Profile>(api: Option<&'static HostApiV0>) -> c_int {
     }
     // The strings are process-lifetime leaks; the host copies the profile.
     let leak = |text: &str| HostStr::new(descriptor::leak_cstr(text));
-    let profile = RudroidUnityProfile {
+    let profile = RudroidEngineProfile {
         id: leak(spec.id),
-        player_class: leak(spec.player_class),
-        player_constructor_signature: leak(spec.player_constructor_signature),
-        init_jni_signature: leak(spec.init_jni_signature),
-        flags: spec.flags,
-        init_jni_int_arg: spec.init_jni_int_arg,
+        validate_config: Some(guest_plan::validate_config),
+        build_guest_plan: Some(guest_plan::build_guest_plan),
         prepare: Some(lifecycle::prepare::<P>),
         bootstrap: Some(lifecycle::bootstrap),
         run: Some(lifecycle::run),
     };
     if !api.register_profile(&profile) {
-        log(api, spec.log_tag, "failed to register early Unity engine profile");
+        log(api, spec.log_tag, "failed to register early engine profile");
         return -5;
     }
     log(api, spec.log_tag, spec.registered_message);

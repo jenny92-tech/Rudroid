@@ -45,9 +45,14 @@ fn spin_facades_serialize_native_threads_and_recover_failed_ownership() {
     use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
     let _serial=crate::LIFECYCLE_TEST_LOCK.lock().unwrap();
     #[repr(C,align(8))] struct Spin {before:u64,word:u64,after:u64}
-    let mut guest=Spin {before:51,word:0,after:52};let p=(&mut guest.word as *mut u64).cast();
+    let mut guest=Spin {before:51,word:0,after:52};let p: *mut c_void=(&mut guest.word as *mut u64).cast();
     // SAFETY: initialized one-word LP64 facade remains live until all native users join.
     unsafe {
+        let misaligned = p.byte_add(4);
+        assert_eq!(spin_init(misaligned, 0), libc::EINVAL);
+        assert_eq!(spin_lock(misaligned), libc::EINVAL);
+        assert_eq!(spin_destroy(misaligned), libc::EINVAL);
+        assert_eq!((guest.before, guest.word, guest.after), (51, 0, 52));
         assert_eq!(spin_lock(p),libc::EINVAL);assert_eq!(spin_init(p,1),libc::ENOTSUP);assert_eq!(spin_init(p,2),libc::EINVAL);
         FAIL.with(|fail|fail.set(true));assert_eq!(spin_init(p,0),libc::ENOMEM);
         FAIL_RECORD.with(|fail|fail.set(true));assert_eq!(spin_init(p,0),libc::ENOMEM);
@@ -186,5 +191,92 @@ fn semaphore_oom_rollback_alignment_and_range_cleanup() {
             assert_eq!(OWNED.lock().unwrap().capacity(),0);
         }
         assert_eq!((object.before,object.after),(41,42));
+    }
+}
+
+#[test]
+fn wait_provider_preserves_original_entries_without_diagnostics() {
+    const CHILD:&str="RUDROID_SYNC_PROVIDER_DEFAULT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","sync::tests::wait_provider_preserves_original_entries_without_diagnostics","--nocapture"])
+            .env(CHILD,"1").env_remove("RUDROID_DIAGNOSTICS").env_remove("RUDROID_DIAGNOSTIC_SYNC").output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));return;
+    }
+    assert!(!crate::sync_observation::enabled());
+    assert_eq!(symbol(c"pthread_cond_wait"),cond_wait as *const () as usize);
+    assert_eq!(symbol(c"pthread_cond_timedwait"),cond_timedwait as *const () as usize);
+}
+
+#[test]
+fn native_wait_roundtrip_preserves_errno_with_observer_enabled() {
+    use std::time::Duration;
+    use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
+    const CHILD:&str="RUDROID_SYNC_OBSERVATION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","sync::tests::native_wait_roundtrip_preserves_errno_with_observer_enabled","--nocapture"])
+            .env(CHILD,"1").env("RUDROID_DIAGNOSTICS","1").env("RUDROID_DIAGNOSTIC_SYNC","1").output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));return;
+    }
+    assert!(crate::sync_observation::enabled());
+    let _serial=crate::LIFECYCLE_TEST_LOCK.lock().unwrap();
+    // SAFETY: exact exported LP64 ABI, owned/aligned facades stay live until
+    // the real waiter joins. No game input or observer-supplied wake is used.
+    unsafe {
+        let lock=mutex_lock;let unlock=mutex_unlock;let signal=cond_signal;
+        type Wait=unsafe extern "C" fn(*mut c_void,*mut c_void)->c_int;
+        type TimedWait=unsafe extern "C" fn(*mut c_void,*mut c_void,*const libc::timespec)->c_int;
+        assert_eq!(symbol(c"pthread_cond_wait"),rudroid_bionic_guest_cond_wait as *const () as usize);
+        assert_eq!(symbol(c"pthread_cond_timedwait"),rudroid_bionic_guest_cond_timedwait as *const () as usize);
+        // The actual guest provider must preserve both original prototypes.
+        let wait:Wait=std::mem::transmute(symbol(c"pthread_cond_wait"));
+        let timed:TimedWait=std::mem::transmute(symbol(c"pthread_cond_timedwait"));
+        let destroy_c=cond_destroy;let destroy_m=mutex_destroy;
+        let mut cond=[0u64;6];let mut mutex=[0u64;5];
+        let c=cond.as_mut_ptr() as usize;let m=mutex.as_mut_ptr() as usize;
+        let release=Arc::new(AtomicBool::new(false));let release_worker=Arc::clone(&release);
+        let (ready,seen)=std::sync::mpsc::channel();
+        let worker=std::thread::spawn(move|| {
+            assert_eq!(lock(m as *mut _),0);ready.send(()).unwrap();
+            *libc::__errno_location()=libc::E2BIG;
+            while !release_worker.load(Ordering::Acquire) {
+                assert_eq!(wait(c as *mut _,m as *mut _),0);
+                assert_eq!(*libc::__errno_location(),libc::E2BIG);
+            }
+            assert_eq!(unlock(m as *mut _),0);
+        });
+        seen.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Taking the same mutex proves the native cond wait released it.
+        assert_eq!(lock(m as *mut _),0);
+        assert!(crate::sync_observation::test_has_condition_wait() || crate::sync_observation::test_dropped()>0,
+            "a missed best-effort observation must be accounted for");
+        let callers=crate::sync_observation::test_condition_wait_callers();
+        assert!(!callers.is_empty(),"the controlled waiter must produce an actual caller record");
+        assert!(callers.iter().all(|caller|*caller>=4 && *caller%4==0),
+            "the ARM64 entry must receive the native caller's return address");
+        release.store(true,Ordering::Release);
+        assert_eq!(signal(c as *mut _),0);assert_eq!(unlock(m as *mut _),0);
+        worker.join().unwrap();
+        assert!(!crate::sync_observation::test_has_condition_wait());
+        assert_eq!(destroy_c(c as *mut _),0);assert_eq!(destroy_m(m as *mut _),0);
+        // timedwait's third register must still carry the absolute deadline;
+        // the diagnostic caller is the new fourth argument, not a replacement.
+        let mut timed_cond=[0u64;6];let mut timed_mutex=[0u64;5];
+        let tc=timed_cond.as_mut_ptr().cast();let tm=timed_mutex.as_mut_ptr().cast();
+        assert_eq!(lock(tm),0);
+        let deadline=libc::timespec {tv_sec:0,tv_nsec:0};
+        *libc::__errno_location()=libc::E2BIG;
+        assert_eq!(timed(tc,tm,&deadline),libc::ETIMEDOUT);
+        assert_eq!(*libc::__errno_location(),libc::E2BIG);
+        assert_eq!((deadline.tv_sec,deadline.tv_nsec),(0,0));
+        assert_eq!(unlock(tm),0);assert_eq!(destroy_c(tc),0);assert_eq!(destroy_m(tm),0);
+        let init=semaphore_init;let trywait=semaphore_trywait;let destroy=semaphore_destroy;
+        let mut sem=[0u64;2];let p=sem.as_mut_ptr().cast();assert_eq!(init(p,0,0),0);
+        *libc::__errno_location()=0;assert_eq!(trywait(p),-1);assert_eq!(*libc::__errno_location(),libc::EAGAIN);
+        let past=libc::timespec {tv_sec:0,tv_nsec:0};
+        *libc::__errno_location()=0;assert_eq!(semaphore_timedwait(p,&past),-1);
+        assert_eq!(*libc::__errno_location(),libc::ETIMEDOUT);
+        assert_eq!(destroy(p),0);
     }
 }

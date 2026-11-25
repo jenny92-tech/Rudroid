@@ -1,3 +1,6 @@
+//! INPUT: deployed capability directories and library filenames
+//! OUTPUT: discovered deploy entries and scan errors
+//! POS: filesystem inventory for loader selection
 //! Deploy-dir scan convention.
 //!
 //! A Deploy Selection run dir mirrors the reference kit layout: capability

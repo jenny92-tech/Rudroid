@@ -22,6 +22,9 @@ use rudroid_test_support::cargo::{compile_c_fixture, ensure_workspace_cdylib};
 use rudroid_unity_loader::{guest, host_api, load_deploy_dir, runtime, Selection};
 use libloading::{Library, Symbol};
 
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
 static LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn lookup(slot: SoSymbolFn, base: usize, name: &str) -> usize {
@@ -82,7 +85,10 @@ fn symtab_only_swappy_target_is_found_and_detoured() {
         deploy.join("gamedata").display()
     ))
     .unwrap();
-    let plan = guest::GuestPlan::from_config(&config).expect("plan");
+    let mut plan = guest::GuestPlan::from_config(&config).expect("plan");
+    if plan.entries.is_empty() {
+        unity_guest_plan::push_unity_arm64_entries(&mut plan);
+    }
     let events = unsafe { guest::bring_up(&capabilities, &plan) }.expect("guest bring-up");
     let base = events
         .iter()

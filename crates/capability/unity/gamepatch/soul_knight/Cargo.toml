@@ -1,0 +1,16 @@
+[package]
+name = "rudroid-unity-gamepatch-soul-knight"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Soul Knight 8.7.0 Application bootstrap adapter"
+
+[lib]
+name = "soul_knight"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rudroid-common = { path = "../../../../common" }
+rudroid-unity-common = { path = "../../common" }

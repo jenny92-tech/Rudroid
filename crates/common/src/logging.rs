@@ -5,6 +5,8 @@
 
 use std::sync::OnceLock;
 
+pub const PRODUCTION: bool = cfg!(all(rudroid_release_profile, not(debug_assertions)));
+
 pub fn diagnostics_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("RUDROID_DIAGNOSTICS").is_some_and(|v| v == "1"))
@@ -14,15 +16,20 @@ pub fn is_error_tag(tag: &str) -> bool {
     matches!(tag, "ERROR" | "FATAL")
 }
 
+pub fn stderr(message: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
+
 #[macro_export]
 macro_rules! error {
-    ($($arg:tt)*) => { eprintln!("[ERROR] {}", format_args!($($arg)*)); };
+    ($($arg:tt)*) => { $crate::logging::stderr(format_args!("[ERROR] {}", format_args!($($arg)*))) };
 }
 
 #[macro_export]
 macro_rules! diagnostic {
     ($($arg:tt)*) => {
-        if $crate::logging::diagnostics_enabled() { eprintln!($($arg)*); }
+        if $crate::logging::diagnostics_enabled() { $crate::logging::stderr(format_args!($($arg)*)); }
     };
 }
 

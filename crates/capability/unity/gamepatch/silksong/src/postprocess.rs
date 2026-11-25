@@ -5,10 +5,10 @@
 
 use super::{lock, InstallEvent, SilksongFeatures};
 use rudroid_common::arm64_detour::Original;
-use rudroid_common::gamepatch_support::install_detour;
+use rudroid_unity_common::gamepatch_support::install_detour;
 use rudroid_common::host_api::HostApiV0;
-use rudroid_common::il2cpp::{Class, Il2cpp, TYPE_VOID};
-use rudroid_common::unity_objects::{BehaviourPruner, StaticSpritePruner};
+use rudroid_unity_common::il2cpp::{Class, Il2cpp, TYPE_VOID};
+use rudroid_unity_common::unity_objects::{BehaviourPruner, StaticSpritePruner};
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_void, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -94,12 +94,7 @@ thread_local! {
     static ENGINE: RefCell<Option<(usize, Option<Engine>)>> = const { RefCell::new(None) };
     static BUSY: Cell<bool> = const { Cell::new(false) };
 }
-struct Guard;
-impl Drop for Guard {
-    fn drop(&mut self) {
-        BUSY.with(|b| b.set(false));
-    }
-}
+use rudroid_unity_common::gamepatch_support::ReentryGuard;
 
 pub(super) struct Runtime {
     host: HostApiV0,
@@ -186,10 +181,7 @@ impl Runtime {
             }
             *owner = Some(current);
         }
-        if BUSY.with(|b| b.replace(true)) {
-            return;
-        }
-        let _guard = Guard;
+        let Some(_guard) = ReentryGuard::enter(&BUSY) else { return; };
         // Finished sentinel prevents reentry/unwind from reinitializing or repeating a prune.
         let previous = ENGINE.with(|slot| slot.replace(Some((identity, None))));
         let mut engine = match previous {

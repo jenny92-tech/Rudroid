@@ -66,6 +66,10 @@ extern "C" fn rudroid_plugin_init(host: Option<&HostApiV0>) -> i32 {
     if host.abi_version != HOST_API_VERSION {
         return -2;
     }
+    if !crate::libdl::publish_guest_libdl_service(host) {
+        host.log_line(c"ELF", "failed to register rudroid.elf.guest_libdl.v1");
+        return -4;
+    }
     let path = host
         .config_string(c"paths.native_companion_dir", 4096)
         .filter(|s| !s.is_empty())

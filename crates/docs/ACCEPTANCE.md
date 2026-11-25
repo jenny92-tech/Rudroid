@@ -79,6 +79,22 @@ Vulkan 路径。这些设备策略与 Unity single/multi 模式独立，见
 固定公共基础镜像配方已有本机重建检查；其他主机的首次构建与每次产物交付仍需验证。
 当前源码说明不等同于已重新构建、部署或执行本轮真机验收。
 
+## 原生 ARM64 Unity Mono 验收
+
+KTC 2.4.3 的 Split APK/OBB 与第一岛存档在 ARM64 Linux、Xvfb 软件 GLES
+上通过普通 `unityloader <config>` 启动。Release kit `rust-kit-86087d2077f5505b`
+包含 `unity_mono`。进程实际映射宿主桥、JIT 和两个 Mono 辅助库，以及客体
+`libmain.so`、`libunity.so`。Mono 装入 165 个程序集并进入 `RunningGame`。
+截图可见第一岛人物及水面倒影，进程 OBB 文件描述符出现非零读取位置。
+该次运行使用标题映射中的 Steam 离线机制，`SteamAPI_Init` 返回失败后游戏继续。
+限帧对照执行了 650 次渲染调用，经过 native player 销毁和服务回收后正常退出。
+容器的 dummy 音频驱动被当前策略拒绝。
+
+MiniLoong 第一岛骑行验收使用单 APK 与 Managed 镜像，内部渲染 480×360，输出 960×720。
+Rudroid 使用两个 Unity Job Worker，三个 60 秒窗口平均 34.189 FPS，P95 帧间隔 37 ms。
+游戏有 PCM 输出，能够正常保存退出并重新读档。该结果限于所测存档、设备和配置。
+配置及独立 ELF 依赖见 [Unity Mono](UNITY-MONO.md)。
+
 ## 已知失败与未验证范围
 
 - A523 丝之歌完整高特效 Vulkan 读档黑屏未通过；早期局部黑块与捕获伪影尚未完全区分。
@@ -87,7 +103,7 @@ Vulkan 路径。这些设备策略与 Unity single/multi 模式独立，见
   更早的 RGA 错误及内核 Oops/panic 根因未定，不能与用户态捕获断言合并归因。
 - 1 GiB 上的短程通过不保证低内存下完整可玩、全关卡稳定 30 帧或长期无泄漏。
   成功呈现计数不能替代真实画面，性能口径见 [性能决策](PERFORMANCE-AUDIT.md)。
-- ARM32、Unity Mono、R36S、其他固件与游戏、所有控制器及物理热插拔、完整 shader
+- 原生 Rust 路线的 ARM32、R36S、其他固件与游戏、所有控制器及物理热插拔、完整 shader
   覆盖和全流程玩法仍需单独验收。
 
 新设备与标题按 [移植指南](HANDHELD-PORTING-WORKFLOW.md)逐阶段检查，

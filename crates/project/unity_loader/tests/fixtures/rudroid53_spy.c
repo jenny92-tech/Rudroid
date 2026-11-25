@@ -91,6 +91,87 @@ static void spy_copy(char* dst, const char* src, int cap) {
 }
 
 struct NativeMethod { const char *name, *signature; void *fn_ptr; };
+#ifdef RUDROID_SPY_UI_JOBS
+/* Real Handler.post -> framework UI queue -> registered JNI Runnable.
+ * Reposting from the callback also checks the queue releases its lock and
+ * drains only the snapshot budget, rather than running an unbounded chain. */
+static int spy_ui_runs;
+#define SPY_UI_RUNS() __atomic_load_n(&spy_ui_runs, __ATOMIC_ACQUIRE)
+static int spy_post_ui(void *env);
+static void spy_ui_run(void *env, jobject object) {
+    (void)object;
+    int count = SPY_UI_RUNS() + 1;
+    __atomic_store_n(&spy_ui_runs, count, __ATOMIC_RELEASE);
+#ifdef RUDROID_SPY_UI_JOB_THROWS
+    jclass error = ((jclass (*)(void *, const char *))(*(void ***)env)[6])(env, "java/lang/IllegalStateException");
+    ((jint (*)(void *, jclass, const char *))(*(void ***)env)[14])(env, error, "UI job failed");
+    ((void (*)(void *, jobject))(*(void ***)env)[23])(env, error);
+#else
+#ifndef RUDROID_SPY_UI_WAIT
+    if (count < 2 && !spy_post_ui(env)) __atomic_store_n(&spy_ui_runs, -100, __ATOMIC_RELEASE);
+#endif
+#endif
+}
+static int spy_post_ui(void *env) {
+    void **table = *(void ***)env;
+    jclass handler_class = ((jclass (*)(void *, const char *))table[6])(env, "android/os/Handler");
+    jclass job_class = ((jclass (*)(void *, const char *))table[6])(env, "org/rudroid/test/UiJob");
+    struct NativeMethod method = {"run", "()V", (void *)spy_ui_run};
+    if (!handler_class || !job_class || ((jint (*)(void *, jclass, const struct NativeMethod *, jint))table[215])(env, job_class, &method, 1) != JNI_OK) return 0;
+    jclass types = ((jclass (*)(void *, const char *))table[6])(env, "org/rudroid/runtime/TypeRegistry");
+    jclass runnable = ((jclass (*)(void *, const char *))table[6])(env, "java/lang/Runnable");
+    void *relation = ((void *(*)(void *, jclass, const char *, const char *))table[113])(env, types, "setSuperclass", "(Ljava/lang/Class;Ljava/lang/Class;)V");
+    if (!types || !runnable || !relation) return 0;
+    SpyValue parents[] = {{.l = job_class}, {.l = runnable}};
+    ((void (*)(void *, jclass, void *, const SpyValue *))table[143])(env, types, relation, parents);
+    jobject handler = ((jobject (*)(void *, jclass))table[27])(env, handler_class);
+    jobject job = ((jobject (*)(void *, jclass))table[27])(env, job_class);
+#ifdef RUDROID_SPY_OWNER_JOBS
+    /* Real Handler() must bind this prepared native owner, not the UI queue.
+       The ordinary UI variant deliberately keeps the previous UI handler. */
+    void *init = ((void *(*)(void *, jclass, const char *, const char *))table[33])(env, handler_class, "<init>", "()V");
+    jclass looper_class = ((jclass (*)(void *, const char *))table[6])(env, "android/os/Looper");
+    void *mine = ((void *(*)(void *, jclass, const char *, const char *))table[113])(env, looper_class, "myLooper", "()Landroid/os/Looper;");
+    void *main = ((void *(*)(void *, jclass, const char *, const char *))table[113])(env, looper_class, "getMainLooper", "()Landroid/os/Looper;");
+    if (!init || !mine || !main) return 0;
+    ((void (*)(void *, jobject, void *, const SpyValue *))table[63])(env, handler, init, 0);
+    jobject own = ((jobject (*)(void *, jclass, void *, const SpyValue *))table[116])(env, looper_class, mine, 0);
+    jobject ui = ((jobject (*)(void *, jclass, void *, const SpyValue *))table[116])(env, looper_class, main, 0);
+    int independent = own && ui && !((jboolean (*)(void *, jobject, jobject))table[24])(env, own, ui)
+        && !((jboolean (*)(void *))table[228])(env);
+    ((void (*)(void *, jobject))table[23])(env, own);
+    ((void (*)(void *, jobject))table[23])(env, ui);
+    ((void (*)(void *, jobject))table[23])(env, looper_class);
+    if (!independent) return 0;
+#endif
+    void *post = ((void *(*)(void *, jclass, const char *, const char *))table[33])(env, handler_class, "post", "(Ljava/lang/Runnable;)Z");
+    SpyValue arg = {.l = job};
+    int posted = handler && job && post
+        && ((jboolean (*)(void *, jobject, jclass))table[32])(env, job, runnable)
+        && ((jboolean (*)(void *, jobject, void *, const SpyValue *))table[39])(env, handler, post, &arg);
+    for (int i = 0; i < 6; ++i) {
+        jobject locals[] = {handler_class, job_class, types, runnable, handler, job};
+        ((void (*)(void *, jobject))table[23])(env, locals[i]);
+    }
+    return posted && !((jboolean (*)(void *))table[228])(env);
+}
+#ifdef RUDROID_SPY_UI_WAIT
+static int spy_wait_ui(void *env, int expected) {
+    /* Freestanding, bounded native wait: no imported pthread/clock shim or
+       manufactured callback. Only the creator's actual UI drain can publish. */
+    for (unsigned i = 0; i < 100000000 && SPY_UI_RUNS() != expected; ++i) {
+#if defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#endif
+    }
+    if (SPY_UI_RUNS() == expected) return 1;
+    jclass error = ((jclass (*)(void *, const char *))(*(void ***)env)[6])(env, "java/lang/IllegalStateException");
+    ((jint (*)(void *, jclass, const char *))(*(void ***)env)[14])(env, error, "Creator UI did not advance during native call");
+    ((void (*)(void *, jobject))(*(void ***)env)[23])(env, error);
+    return 0;
+}
+#endif
+#endif
 jboolean rudroid_spy_NativeLoader_load(void *env,jclass clazz,jstring dir);
 void rudroid_spy_initJni_ctx(void *, jobject, jobject);
 void rudroid_spy_initJni_ctx_i(void *, jobject, jobject, jint);
@@ -285,7 +366,16 @@ void rudroid_spy_nativeResume(void* env, jobject thiz) {
 }
 
 jboolean rudroid_spy_nativePause(void* env,jobject thiz) {(void)env;(void)thiz;spy_record(SPY_PAUSE,0,0,"");return JNI_FALSE;}
-jboolean rudroid_spy_nativeDone(void* env,jobject thiz) {(void)env;(void)thiz;spy_record(SPY_DONE,0,0,"");return JNI_FALSE;}
+jboolean rudroid_spy_nativeDone(void* env,jobject thiz) {
+    (void)env;(void)thiz;
+#ifdef RUDROID_SPY_UI_WAIT
+    int completed = spy_post_ui(env) && spy_wait_ui(env, 2);
+    spy_record(SPY_DONE, completed, SPY_UI_RUNS(), "UI terminal");
+#else
+    spy_record(SPY_DONE,0,0,"");
+#endif
+    return JNI_FALSE;
+}
 
 /* Guest `nativeRender()Z`: returns true so the loop continues; the
  * OMIT_RENDER variant drops the export entirely (missing-required-function
@@ -295,9 +385,30 @@ jboolean rudroid_spy_nativeDone(void* env,jobject thiz) {(void)env;(void)thiz;sp
 jboolean rudroid_spy_nativeRender(void* env, jobject thiz) {
     (void)env; (void)thiz;
     ++spy_render_frames;
+#ifdef RUDROID_SPY_UI_WAIT
+    spy_record(SPY_RENDER, spy_render_frames, SPY_UI_RUNS(), "UI wait");
+    if (spy_render_frames == 1 && (!spy_post_ui(env) || !spy_wait_ui(env, 1))) return JNI_FALSE;
+#elif defined(RUDROID_SPY_UI_JOBS)
+    spy_record(SPY_RENDER, spy_render_frames, SPY_UI_RUNS(), "UI jobs");
+    if (SPY_UI_RUNS() != spy_render_frames - 1 || (spy_render_frames == 1 && !spy_post_ui(env))) {
+        jclass error = ((jclass (*)(void *, const char *))(*(void ***)env)[6])(env, "java/lang/IllegalStateException");
+        ((jint (*)(void *, jclass, const char *))(*(void ***)env)[14])(env, error, "UI jobs did not advance between native frames");
+        ((void (*)(void *, jobject))(*(void ***)env)[23])(env, error);
+        return JNI_FALSE;
+    }
+#else
     spy_record(SPY_RENDER, spy_render_frames, 0, "");
+#endif
 #ifdef RUDROID_SPY_RENDER_FALSE_BEFORE
     if (spy_render_frames <= RUDROID_SPY_RENDER_FALSE_BEFORE) return JNI_FALSE;
+#endif
+#ifdef RUDROID_SPY_RENDER_THROWS_AT
+    if (spy_render_frames == RUDROID_SPY_RENDER_THROWS_AT) {
+        jclass error = ((jclass (*)(void *, const char *))(*(void ***)env)[6])(env, "java/lang/IllegalStateException");
+        ((jint (*)(void *, jclass, const char *))(*(void ***)env)[14])(env, error, "Worker render failed");
+        ((void (*)(void *, jobject))(*(void ***)env)[23])(env, error);
+        return JNI_FALSE;
+    }
 #endif
 #ifdef RUDROID_SPY_RENDER_STOP_AT
     if (spy_render_frames >= RUDROID_SPY_RENDER_STOP_AT) return JNI_FALSE;

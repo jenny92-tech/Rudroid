@@ -185,9 +185,9 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         (*env)->ExceptionClear(env);
         report_set(r, 12);
 
-        /* Step 13: ThrowNew raises a pending exception the guest can
-         * observe. */
-        if ((*env)->ThrowNew(env, clazz, "rudroid52 probe exception") != JNI_OK) {
+        /* Step 13: ThrowNew preserves the requested exception class. */
+        jclass throwable_class = (*env)->FindClass(env, "java/lang/RuntimeException");
+        if (throwable_class == 0 || (*env)->ThrowNew(env, throwable_class, "rudroid52 probe exception") != JNI_OK) {
             r->fail_step = 13;
             return (0x5200 | 13);
         }
@@ -197,6 +197,12 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
             return (0x5200 | 13);
         }
         (*env)->ExceptionClear(env);
+        jclass exception_class = (*env)->GetObjectClass(env, exception);
+        if (exception_class == 0 || !(*env)->IsSameObject(env, exception_class, throwable_class)) {
+            r->fail_step = 13;
+            return (0x5200 | 13);
+        }
+        (*env)->DeleteLocalRef(env, exception_class);
         (*env)->DeleteLocalRef(env, exception);
         if ((*env)->ExceptionCheck(env)) { r->fail_step = 13; return (0x5200 | 13); }
         report_set(r, 13);
@@ -242,7 +248,7 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 
         /* Step 16: a pending exception BLOCKS calls (no execution, zero
          * result) until cleared — explicit, never a silent default. */
-        if ((*env)->ThrowNew(env, clazz, "rudroid52 blocked call") != JNI_OK) {
+        if ((*env)->ThrowNew(env, throwable_class, "rudroid52 blocked call") != JNI_OK) {
             r->fail_step = 16;
             return (0x5200 | 16);
         }
@@ -253,6 +259,7 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         }
         if ((*env)->ExceptionCheck(env) != JNI_TRUE) { r->fail_step = 16; return (0x5200 | 16); }
         (*env)->ExceptionClear(env);
+        (*env)->DeleteLocalRef(env, throwable_class);
         args[0].i = 3;
         if ((*env)->CallStaticIntMethodA(env, clazz, method_int, args) != 100) {
             r->fail_step = 16;
@@ -450,6 +457,427 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         (*env)->DeleteLocalRef(env,name);(*env)->DeleteLocalRef(env,key);
         (*env)->DeleteLocalRef(env,context_class);(*env)->DeleteLocalRef(env,prefs_class);
         report_set(r,21);
+    }
+
+    /* Step 22: the framework's bounded ActivityThread facade is the SAME
+     * process identity the shared VM already advertises, verified from the
+     * guest side across libraries (android_base registers it, this probe only
+     * walks the shared JNI table). currentActivityThread is a process
+     * singleton, its class is the requested one, and both Application
+     * accessors alias Context.getApplicationContext — one rooted object, three
+     * fresh caller-local views, no second Application copy. Only the three
+     * advertised accessors exist: no other ActivityThread member is implied. */
+    {
+        jclass context_class=(*env)->FindClass(env,"android/content/Context");
+        jclass thread_class=(*env)->FindClass(env,"android/app/ActivityThread");
+        jclass application_class=(*env)->FindClass(env,"android/app/Application");
+        jobject context=(*env)->AllocObject(env,context_class);
+        jmethodID get_context, get_thread, get_current_app, get_app;
+        jobject application, thread, thread_again, class_of, application_local;
+        if(!context_class||!thread_class||!application_class||!context) {r->fail_step=22;return (0x5200|22);}
+        get_context=(*env)->GetMethodID(env,context_class,"getApplicationContext","()Landroid/content/Context;");
+        get_thread=(*env)->GetStaticMethodID(env,thread_class,"currentActivityThread","()Landroid/app/ActivityThread;");
+        get_current_app=(*env)->GetStaticMethodID(env,thread_class,"currentApplication","()Landroid/app/Application;");
+        get_app=(*env)->GetMethodID(env,thread_class,"getApplication","()Landroid/app/Application;");
+        if(!get_context||!get_thread||!get_current_app||!get_app||(*env)->ExceptionCheck(env)) {r->fail_step=22;return (0x5200|22);}
+        application=(*env)->CallObjectMethodA(env,context,get_context,0);
+        thread=(*env)->CallStaticObjectMethodA(env,thread_class,get_thread,0);
+        thread_again=(*env)->CallStaticObjectMethodA(env,thread_class,get_thread,0);
+        if(!application||!thread||!thread_again||(*env)->ExceptionCheck(env)) {r->fail_step=22;return (0x5200|22);}
+        if((*env)->IsSameObject(env,thread,thread_again)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        /* The instance's runtime class is the requested ActivityThread class. */
+        class_of=(*env)->GetObjectClass(env,thread);
+        if(!class_of||(*env)->IsSameObject(env,class_of,thread_class)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        (*env)->DeleteLocalRef(env,class_of);
+        /* The Context accessor really yields an android/app/Application, and
+         * both ActivityThread accessors hand back THAT object: one Application
+         * for the process, no separate owner or copy. */
+        class_of=(*env)->GetObjectClass(env,application);
+        if(!class_of||(*env)->IsSameObject(env,class_of,application_class)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        (*env)->DeleteLocalRef(env,class_of);
+        application_local=(*env)->CallStaticObjectMethodA(env,thread_class,get_current_app,0);
+        if(!application_local||(*env)->IsSameObject(env,application_local,application)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        (*env)->DeleteLocalRef(env,application_local);
+        application_local=(*env)->CallObjectMethodA(env,thread,get_app,0);
+        if(!application_local||(*env)->IsSameObject(env,application_local,application)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        if((*env)->ExceptionCheck(env)) {r->fail_step=22;return (0x5200|22);}
+        /* The advertised Application really is an android/app/Application. */
+        class_of=(*env)->GetObjectClass(env,application_local);
+        if(!class_of||(*env)->IsSameObject(env,class_of,application_class)!=JNI_TRUE) {r->fail_step=22;return (0x5200|22);}
+        (*env)->DeleteLocalRef(env,class_of);
+        (*env)->DeleteLocalRef(env,application_local);
+        (*env)->DeleteLocalRef(env,thread_again);
+        (*env)->DeleteLocalRef(env,thread);
+        (*env)->DeleteLocalRef(env,application);
+        (*env)->DeleteLocalRef(env,context);
+        (*env)->DeleteLocalRef(env,context_class);
+        (*env)->DeleteLocalRef(env,thread_class);
+        (*env)->DeleteLocalRef(env,application_class);
+        if((*env)->ExceptionCheck(env)) {r->fail_step=22;return (0x5200|22);}
+        report_set(r,22);
+    }
+
+    /* Step 23: the framework's zero-argument android/content/Intent
+     * constructor. Android's empty Intent() does nothing beyond ordinary
+     * fresh-object initialization, so the shared VM's fresh field defaults
+     * must already satisfy it: two NewObjectA views are distinct Intents with
+     * null action/package/categories and zero flags, mutating ONE through the
+     * already-registered setters leaves the other empty, and a third default
+     * object built after that mutation is still empty (no cross-object reset
+     * or shared launcher-Intent state). */
+    {
+        jclass intent_class=(*env)->FindClass(env,"android/content/Intent");
+        jmethodID ctor, ctor_named, get_action, get_package, get_categories, get_flags, set_flags, set_package;
+        jobject first, second, third, class_of, mutated, package_string, action, package, categories;
+        jvalue argument;
+        jint flags;
+        if(!intent_class) {r->fail_step=23;return (0x5200|23);}
+        ctor=(*env)->GetMethodID(env,intent_class,"<init>","()V");
+        ctor_named=(*env)->GetMethodID(env,intent_class,"<init>","(Ljava/lang/String;)V");
+        get_action=(*env)->GetMethodID(env,intent_class,"getAction","()Ljava/lang/String;");
+        get_package=(*env)->GetMethodID(env,intent_class,"getPackage","()Ljava/lang/String;");
+        get_categories=(*env)->GetMethodID(env,intent_class,"getCategories","()Ljava/util/Set;");
+        get_flags=(*env)->GetMethodID(env,intent_class,"getFlags","()I");
+        set_flags=(*env)->GetMethodID(env,intent_class,"setFlags","(I)Landroid/content/Intent;");
+        set_package=(*env)->GetMethodID(env,intent_class,"setPackage","(Ljava/lang/String;)Landroid/content/Intent;");
+        if(!ctor||!ctor_named||!get_action||!get_package||!get_categories||!get_flags||!set_flags||!set_package
+           ||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        first=(*env)->NewObjectA(env,intent_class,ctor,0);
+        second=(*env)->NewObjectA(env,intent_class,ctor,0);
+        if(!first||!second||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        /* Each default object really is an android/content/Intent... */
+        class_of=(*env)->GetObjectClass(env,first);
+        if(!class_of||(*env)->IsSameObject(env,class_of,intent_class)!=JNI_TRUE) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,class_of);
+        /* ...and the two are distinct objects, never a shared singleton. */
+        if((*env)->IsSameObject(env,first,second)==JNI_TRUE) {r->fail_step=23;return (0x5200|23);}
+        /* A fresh default Intent carries only field defaults: no action, no
+         * package, no categories and zero flags, without a pending exception. */
+        action=(*env)->CallObjectMethodA(env,first,get_action,0);
+        package=(*env)->CallObjectMethodA(env,first,get_package,0);
+        categories=(*env)->CallObjectMethodA(env,first,get_categories,0);
+        flags=(*env)->CallIntMethodA(env,first,get_flags,0);
+        if(action||package||categories||flags!=0||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,action);
+        (*env)->DeleteLocalRef(env,package);
+        (*env)->DeleteLocalRef(env,categories);
+        /* Mutate ONLY the first object through the already-registered setters
+         * (the named constructor is also proven live by the same lookup). */
+        package_string=(*env)->NewStringUTF(env,"com.example.notused");
+        argument.l=package_string;
+        mutated=(*env)->CallObjectMethodA(env,first,set_package,&argument);
+        if(!mutated||(*env)->IsSameObject(env,mutated,first)!=JNI_TRUE||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,mutated);
+        argument.i=0x20;
+        mutated=(*env)->CallObjectMethodA(env,first,set_flags,&argument);
+        if(!mutated||(*env)->IsSameObject(env,mutated,first)!=JNI_TRUE||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,mutated);
+        if((*env)->CallIntMethodA(env,first,get_flags,0)!=0x20||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        package=(*env)->CallObjectMethodA(env,first,get_package,0);
+        if(!package||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,package);
+        /* The other default Intent is untouched... */
+        action=(*env)->CallObjectMethodA(env,second,get_action,0);
+        package=(*env)->CallObjectMethodA(env,second,get_package,0);
+        categories=(*env)->CallObjectMethodA(env,second,get_categories,0);
+        flags=(*env)->CallIntMethodA(env,second,get_flags,0);
+        if(action||package||categories||flags!=0||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,action);
+        (*env)->DeleteLocalRef(env,package);
+        (*env)->DeleteLocalRef(env,categories);
+        /* ...and a default Intent built AFTER that mutation is still empty. */
+        third=(*env)->NewObjectA(env,intent_class,ctor,0);
+        if(!third||(*env)->IsSameObject(env,third,first)==JNI_TRUE||(*env)->IsSameObject(env,third,second)==JNI_TRUE
+           ||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        action=(*env)->CallObjectMethodA(env,third,get_action,0);
+        package=(*env)->CallObjectMethodA(env,third,get_package,0);
+        categories=(*env)->CallObjectMethodA(env,third,get_categories,0);
+        flags=(*env)->CallIntMethodA(env,third,get_flags,0);
+        if(action||package||categories||flags!=0||(*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        (*env)->DeleteLocalRef(env,action);
+        (*env)->DeleteLocalRef(env,package);
+        (*env)->DeleteLocalRef(env,categories);
+        (*env)->DeleteLocalRef(env,third);
+        (*env)->DeleteLocalRef(env,second);
+        (*env)->DeleteLocalRef(env,first);
+        (*env)->DeleteLocalRef(env,package_string);
+        (*env)->DeleteLocalRef(env,intent_class);
+        if((*env)->ExceptionCheck(env)) {r->fail_step=23;return (0x5200|23);}
+        report_set(r,23);
+    }
+
+    /* Step 24: standard Intent.setAction(String)Intent. It must be fluent
+     * (returns the SAME object, not a copy), assign the same action field the
+     * (String) constructor uses, compare equal to the supplied String, accept a
+     * null argument as an action reset, and leave every other Intent alone -
+     * including the distinct launcher Intent Activity.getIntent advertises. */
+    {
+        jclass intent_class=(*env)->FindClass(env,"android/content/Intent");
+        jclass activity_class=(*env)->FindClass(env,"android/app/Activity");
+        jmethodID ctor, set_action, get_action;
+        jobject first, other, returned, launcher, activity, action_string, action_seen;
+        const char* action_chars;
+        jvalue argument;
+        if(!intent_class||!activity_class) {r->fail_step=24;return (0x5200|24);}
+        ctor=(*env)->GetMethodID(env,intent_class,"<init>","()V");
+        set_action=(*env)->GetMethodID(env,intent_class,"setAction","(Ljava/lang/String;)Landroid/content/Intent;");
+        get_action=(*env)->GetMethodID(env,intent_class,"getAction","()Ljava/lang/String;");
+        if(!ctor||!set_action||!get_action||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        first=(*env)->NewObjectA(env,intent_class,ctor,0);
+        other=(*env)->NewObjectA(env,intent_class,ctor,0);
+        activity=(*env)->AllocObject(env,activity_class);
+        if(!first||!other||!activity||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        action_string=(*env)->NewStringUTF(env,"android.intent.action.MAIN");
+        if(!action_string) {r->fail_step=24;return (0x5200|24);}
+        argument.l=action_string;
+        returned=(*env)->CallObjectMethodA(env,first,set_action,&argument);
+        /* Fluent identity: the receiver comes back, never a second owner. */
+        if(!returned||(*env)->IsSameObject(env,returned,first)!=JNI_TRUE||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        (*env)->DeleteLocalRef(env,returned);
+        /* The stored action compares equal to the supplied String. */
+        action_seen=(*env)->CallObjectMethodA(env,first,get_action,0);
+        if(!action_seen||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        action_chars=(*env)->GetStringUTFChars(env,action_seen,0);
+        if(!action_chars||!streq(action_chars,"android.intent.action.MAIN")) {r->fail_step=24;return (0x5200|24);}
+        (*env)->ReleaseStringUTFChars(env,action_seen,action_chars);
+        (*env)->DeleteLocalRef(env,action_seen);
+        /* A null argument resets the action on the SAME object. */
+        argument.l=0;
+        returned=(*env)->CallObjectMethodA(env,first,set_action,&argument);
+        if(!returned||(*env)->IsSameObject(env,returned,first)!=JNI_TRUE||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        (*env)->DeleteLocalRef(env,returned);
+        action_seen=(*env)->CallObjectMethodA(env,first,get_action,0);
+        if(action_seen||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        (*env)->DeleteLocalRef(env,action_seen);
+        /* Independence: the other default Intent never received an action... */
+        action_seen=(*env)->CallObjectMethodA(env,other,get_action,0);
+        if(action_seen||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        (*env)->DeleteLocalRef(env,action_seen);
+        /* ...and the launcher Intent stays a distinct object with its own
+         * configured action, untouched by this Intent's set/reset. */
+        {
+            jmethodID get_intent=(*env)->GetMethodID(env,activity_class,"getIntent","()Landroid/content/Intent;");
+            if(!get_intent||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+            launcher=(*env)->CallObjectMethodA(env,activity,get_intent,0);
+            if(!launcher||(*env)->IsSameObject(env,launcher,first)==JNI_TRUE
+               ||(*env)->IsSameObject(env,launcher,other)==JNI_TRUE||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+            action_seen=(*env)->CallObjectMethodA(env,launcher,get_action,0);
+            if(!action_seen||(*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+            action_chars=(*env)->GetStringUTFChars(env,action_seen,0);
+            if(!action_chars||!streq(action_chars,"android.intent.action.MAIN")) {r->fail_step=24;return (0x5200|24);}
+            (*env)->ReleaseStringUTFChars(env,action_seen,action_chars);
+            (*env)->DeleteLocalRef(env,action_seen);
+            (*env)->DeleteLocalRef(env,launcher);
+        }
+        (*env)->DeleteLocalRef(env,action_string);
+        (*env)->DeleteLocalRef(env,activity);
+        (*env)->DeleteLocalRef(env,other);
+        (*env)->DeleteLocalRef(env,first);
+        (*env)->DeleteLocalRef(env,intent_class);
+        (*env)->DeleteLocalRef(env,activity_class);
+        if((*env)->ExceptionCheck(env)) {r->fail_step=24;return (0x5200|24);}
+        report_set(r,24);
+    }
+    /* Step 25: real string extras, separate Intent owners, and detached Bundle
+     * snapshots. Null mappings must shadow launcher defaults without vanishing;
+     * keys compare by UTF-16 content, including embedded NUL/surrogate units. */
+    {
+        jclass ic=(*env)->FindClass(env,"android/content/Intent");
+        jclass bc=(*env)->FindClass(env,"android/os/Bundle");
+        jclass ac=(*env)->FindClass(env,"android/app/Activity");
+        jmethodID ctor=(*env)->GetMethodID(env,ic,"<init>","()V");
+        jmethodID put=(*env)->GetMethodID(env,ic,"putExtra","(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;");
+        jmethodID get=(*env)->GetMethodID(env,ic,"getStringExtra","(Ljava/lang/String;)Ljava/lang/String;");
+        jmethodID all=(*env)->GetMethodID(env,ic,"getExtras","()Landroid/os/Bundle;");
+        jmethodID bp=(*env)->GetMethodID(env,bc,"putString","(Ljava/lang/String;Ljava/lang/String;)V");
+        jmethodID bg=(*env)->GetMethodID(env,bc,"getString","(Ljava/lang/String;)Ljava/lang/String;");
+        jmethodID bd=(*env)->GetMethodID(env,bc,"getString","(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+        jmethodID has=(*env)->GetMethodID(env,bc,"containsKey","(Ljava/lang/String;)Z");
+        jmethodID launch=(*env)->GetMethodID(env,ac,"getIntent","()Landroid/content/Intent;");
+        jobject first,second,key,same_key,one,two,fallback,a,b,activity,launcher,la,lb,lc,config,configured;
+        jobject unicode_key,unicode_again;
+        jvalue args[2];
+        jchar units[]={0x41,0,0xd800};
+#define EXTRA_REQUIRE(condition) do { if(!(condition)||(*env)->ExceptionCheck(env)) {r->fail_step=25;return (0x5200|25);} } while(0)
+#define EXTRA_REF(expression,expected) do { jobject result=(expression); EXTRA_REQUIRE((*env)->IsSameObject(env,result,(expected))==JNI_TRUE); (*env)->DeleteLocalRef(env,result); } while(0)
+        EXTRA_REQUIRE(ic&&bc&&ac&&ctor&&put&&get&&all&&bp&&bg&&bd&&has&&launch);
+        first=(*env)->NewObjectA(env,ic,ctor,0);second=(*env)->NewObjectA(env,ic,ctor,0);
+        key=(*env)->NewStringUTF(env,"probe.extra");same_key=(*env)->NewStringUTF(env,"probe.extra");
+        one=(*env)->NewStringUTF(env,"one");two=(*env)->NewStringUTF(env,"two");fallback=(*env)->NewStringUTF(env,"fallback");
+        EXTRA_REQUIRE(first&&second&&key&&same_key&&one&&two&&fallback);
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,all,0),0);
+        args[0].l=key;args[1].l=one;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,put,args),first);
+        args[0].l=same_key;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,get,args),one);
+        EXTRA_REF((*env)->CallObjectMethodA(env,second,get,args),0);
+        args[1].l=two;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,put,args),first);
+        a=(*env)->CallObjectMethodA(env,first,all,0);b=(*env)->CallObjectMethodA(env,first,all,0);
+        EXTRA_REQUIRE(a&&b&&(*env)->IsSameObject(env,a,b)==JNI_FALSE);
+        args[1].l=one;(*env)->CallVoidMethodA(env,a,bp,args);
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,get,args),two);
+        EXTRA_REF((*env)->CallObjectMethodA(env,b,bg,args),two);
+        EXTRA_REF((*env)->CallObjectMethodA(env,a,bg,args),one);
+        args[0].l=0;args[1].l=one;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,put,args),first);
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,get,args),one);
+        unicode_key=(*env)->NewString(env,units,3);unicode_again=(*env)->NewString(env,units,3);
+        EXTRA_REQUIRE(unicode_key&&unicode_again);
+        args[0].l=unicode_key;args[1].l=two;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,put,args),first);
+        (*env)->DeleteLocalRef(env,unicode_key);
+        args[0].l=unicode_again;
+        EXTRA_REF((*env)->CallObjectMethodA(env,first,get,args),two);
+
+        activity=(*env)->AllocObject(env,ac);launcher=(*env)->CallObjectMethodA(env,activity,launch,0);
+        config=(*env)->NewStringUTF(env,"rudroid_probe_config");configured=(*env)->NewStringUTF(env,"configured");
+        EXTRA_REQUIRE(activity&&launcher&&config&&configured);
+        args[0].l=config;
+        { jobject value=(*env)->CallObjectMethodA(env,launcher,get,args);const char* text;
+          EXTRA_REQUIRE(value);text=(*env)->GetStringUTFChars(env,value,0);
+          EXTRA_REQUIRE(text&&streq(text,"configured"));(*env)->ReleaseStringUTFChars(env,value,text);(*env)->DeleteLocalRef(env,value); }
+        EXTRA_REF((*env)->CallObjectMethodA(env,second,get,args),0);
+        la=(*env)->CallObjectMethodA(env,launcher,all,0);lb=(*env)->CallObjectMethodA(env,launcher,all,0);
+        EXTRA_REQUIRE(la&&lb);
+        args[1].l=0;(*env)->CallVoidMethodA(env,la,bp,args);
+        EXTRA_REQUIRE((*env)->CallBooleanMethodA(env,la,has,args)==JNI_TRUE);
+        args[1].l=fallback;
+        EXTRA_REF((*env)->CallObjectMethodA(env,la,bd,args),fallback);
+        { jobject value=(*env)->CallObjectMethodA(env,lb,bg,args);const char* text;
+          EXTRA_REQUIRE(value);text=(*env)->GetStringUTFChars(env,value,0);
+          EXTRA_REQUIRE(text&&streq(text,"configured"));(*env)->ReleaseStringUTFChars(env,value,text);(*env)->DeleteLocalRef(env,value); }
+        /* Null override on the launcher must not fall back to configuration. */
+        args[1].l=0;EXTRA_REF((*env)->CallObjectMethodA(env,launcher,put,args),launcher);
+        EXTRA_REF((*env)->CallObjectMethodA(env,launcher,get,args),0);
+        lc=(*env)->CallObjectMethodA(env,launcher,all,0);EXTRA_REQUIRE(lc);
+        EXTRA_REQUIRE((*env)->CallBooleanMethodA(env,lc,has,args)==JNI_TRUE);
+        args[1].l=fallback;EXTRA_REF((*env)->CallObjectMethodA(env,lc,bd,args),fallback);
+        args[1].l=configured;EXTRA_REF((*env)->CallObjectMethodA(env,launcher,put,args),launcher);
+        { jobject locals[]={first,second,key,same_key,one,two,fallback,a,b,activity,launcher,la,lb,lc,config,configured,unicode_again,ic,bc,ac};
+          unsigned int i;for(i=0;i<sizeof(locals)/sizeof(locals[0]);++i)(*env)->DeleteLocalRef(env,locals[i]); }
+        EXTRA_REQUIRE(1);report_set(r,25);
+#undef EXTRA_REF
+#undef EXTRA_REQUIRE
+    }
+    /* Step 26: Java Class.getSuperclass uses the same ordinary-class
+     * authority as JNI, with independently known expected parents. */
+    {
+        jclass meta=(*env)->FindClass(env,"java/lang/Class");
+        jclass app=(*env)->FindClass(env,"android/app/Application");
+        jclass context=(*env)->FindClass(env,"android/content/Context");
+        jclass object=(*env)->FindClass(env,"java/lang/Object");
+        jclass array=(*env)->FindClass(env,"[Ljava/lang/String;");
+        jmethodID parent=(*env)->GetMethodID(env,meta,"getSuperclass","()Ljava/lang/Class;");
+        jobject from_java,from_jni;
+#define SUPER_REQUIRE(x) do{if(!(x)||(*env)->ExceptionCheck(env)){r->fail_step=26;return (0x5200|26);}}while(0)
+        SUPER_REQUIRE(meta&&app&&context&&object&&array&&parent);
+        from_java=(*env)->CallObjectMethodA(env,app,parent,0);
+        from_jni=(*env)->GetSuperclass(env,app);
+        SUPER_REQUIRE((*env)->IsSameObject(env,from_java,context)&&(*env)->IsSameObject(env,from_jni,context));
+        (*env)->DeleteLocalRef(env,from_java);(*env)->DeleteLocalRef(env,from_jni);
+        from_java=(*env)->CallObjectMethodA(env,object,parent,0);
+        SUPER_REQUIRE(from_java==0&&(*env)->GetSuperclass(env,object)==0);
+        from_java=(*env)->CallObjectMethodA(env,array,parent,0);
+        from_jni=(*env)->GetSuperclass(env,array);
+        SUPER_REQUIRE((*env)->IsSameObject(env,from_java,object)&&(*env)->IsSameObject(env,from_jni,object));
+        {jobject locals[]={from_java,from_jni,meta,app,context,object,array};unsigned int i;
+         for(i=0;i<sizeof(locals)/sizeof(locals[0]);++i)(*env)->DeleteLocalRef(env,locals[i]);}
+        SUPER_REQUIRE(1);report_set(r,26);
+#undef SUPER_REQUIRE
+    }
+    /* Step 27: declared APK SDK levels come from package metadata and do
+     * not replace the compatibility runtime's independent API level. */
+    {
+        jclass activity=(*env)->FindClass(env,"android/app/Activity");
+        jclass info_class=(*env)->FindClass(env,"android/content/pm/ApplicationInfo");
+        jclass version=(*env)->FindClass(env,"android/os/Build$VERSION");
+        jobject context=(*env)->AllocObject(env,activity),info;
+        jmethodID get=(*env)->GetMethodID(env,activity,"getApplicationInfo","()Landroid/content/pm/ApplicationInfo;");
+        jfieldID min=(*env)->GetFieldID(env,info_class,"minSdkVersion","I");
+        jfieldID target=(*env)->GetFieldID(env,info_class,"targetSdkVersion","I");
+        jfieldID runtime=(*env)->GetStaticFieldID(env,version,"SDK_INT","I");
+#define SDK_REQUIRE(x) do{if(!(x)||(*env)->ExceptionCheck(env)){r->fail_step=27;return (0x5200|27);}}while(0)
+        SDK_REQUIRE(activity&&info_class&&version&&context&&get&&min&&target&&runtime);
+        info=(*env)->CallObjectMethodA(env,context,get,0);SDK_REQUIRE(info);
+        SDK_REQUIRE((*env)->GetIntField(env,info,min)==24);
+        SDK_REQUIRE((*env)->GetIntField(env,info,target)==35);
+        SDK_REQUIRE((*env)->GetStaticIntField(env,version,runtime)==26);
+        {
+            jmethodID get_manager=(*env)->GetMethodID(env,activity,"getPackageManager","()Landroid/content/pm/PackageManager;");
+            jobject manager=(*env)->CallObjectMethodA(env,context,get_manager,0),package_info,from_package;
+            jclass manager_class=(*env)->FindClass(env,"android/content/pm/PackageManager");
+            jclass package_class=(*env)->FindClass(env,"android/content/pm/PackageInfo");
+            jmethodID get_package=(*env)->GetMethodID(env,manager_class,"getPackageInfo","(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
+            jfieldID application=(*env)->GetFieldID(env,package_class,"applicationInfo","Landroid/content/pm/ApplicationInfo;");
+            jstring name=(*env)->NewStringUTF(env,"org.rudroid.fixture");jvalue args[2];
+            SDK_REQUIRE(get_manager&&manager&&manager_class&&package_class&&get_package&&application&&name);
+            args[0].l=name;args[1].i=0;package_info=(*env)->CallObjectMethodA(env,manager,get_package,args);SDK_REQUIRE(package_info);
+            from_package=(*env)->GetObjectField(env,package_info,application);
+            SDK_REQUIRE((*env)->IsSameObject(env,info,from_package));
+            {jobject locals[]={from_package,package_info,name,manager,manager_class,package_class};unsigned int i;
+             for(i=0;i<sizeof(locals)/sizeof(locals[0]);++i)(*env)->DeleteLocalRef(env,locals[i]);}
+        }
+        {jobject locals[]={info,context,activity,info_class,version};unsigned int i;
+         for(i=0;i<sizeof(locals)/sizeof(locals[0]);++i)(*env)->DeleteLocalRef(env,locals[i]);}
+        SDK_REQUIRE(1);report_set(r,27);
+#undef SDK_REQUIRE
+    }
+    /* Step 28: filters keep independent ordered action sets, including
+     * duplicates, UTF-16 strings, strong ownership and real failure cases. */
+    {
+        jclass filter=(*env)->FindClass(env,"android/content/IntentFilter");
+        jmethodID ctor=(*env)->GetMethodID(env,filter,"<init>","()V");
+        jmethodID named=(*env)->GetMethodID(env,filter,"<init>","(Ljava/lang/String;)V");
+        jmethodID add=(*env)->GetMethodID(env,filter,"addAction","(Ljava/lang/String;)V");
+        jmethodID count=(*env)->GetMethodID(env,filter,"countActions","()I");
+        jmethodID get=(*env)->GetMethodID(env,filter,"getAction","(I)Ljava/lang/String;");
+        jmethodID has=(*env)->GetMethodID(env,filter,"hasAction","(Ljava/lang/String;)Z");
+        jmethodID match=(*env)->GetMethodID(env,filter,"matchAction","(Ljava/lang/String;)Z");
+        jstring a=(*env)->NewStringUTF(env,"fixture.action.A"),same=(*env)->NewStringUTF(env,"fixture.action.A");
+        jstring b=(*env)->NewStringUTF(env,"fixture.action.B"),unicode,again,value;
+        jobject first,second; jvalue args[1];jchar units[]={0x78,0,0xd800};
+#define FILTER_REQUIRE(x) do{if(!(x)||(*env)->ExceptionCheck(env)){r->fail_step=28;return (0x5200|28);}}while(0)
+#define FILTER_ERROR(name) do{jthrowable ex=(*env)->ExceptionOccurred(env);jclass cls; \
+        if(!ex){r->fail_step=28;return (0x5200|28);}(*env)->ExceptionClear(env);cls=(*env)->FindClass(env,name); \
+        FILTER_REQUIRE(cls&&(*env)->IsInstanceOf(env,ex,cls));(*env)->DeleteLocalRef(env,ex);(*env)->DeleteLocalRef(env,cls);}while(0)
+        FILTER_REQUIRE(filter&&ctor&&named&&add&&count&&get&&has&&match&&a&&same&&b);
+        first=(*env)->NewObjectA(env,filter,ctor,0);args[0].l=a;second=(*env)->NewObjectA(env,filter,named,args);
+        FILTER_REQUIRE(first&&second);
+        FILTER_REQUIRE((*env)->CallIntMethodA(env,first,count,0)==0&&(*env)->CallIntMethodA(env,second,count,0)==1);
+        FILTER_REQUIRE((*env)->CallBooleanMethodA(env,first,has,args)==JNI_FALSE);
+        FILTER_REQUIRE((*env)->CallBooleanMethodA(env,second,match,args)==JNI_TRUE);
+        (*env)->CallVoidMethodA(env,first,add,args);args[0].l=same;(*env)->CallVoidMethodA(env,first,add,args);
+        FILTER_REQUIRE((*env)->CallIntMethodA(env,first,count,0)==1);
+        args[0].l=b;(*env)->CallVoidMethodA(env,first,add,args);
+        (*env)->DeleteLocalRef(env,a);(*env)->DeleteLocalRef(env,same);(*env)->DeleteLocalRef(env,b);
+        args[0].i=0;value=(*env)->CallObjectMethodA(env,first,get,args);
+        {const char* text=(*env)->GetStringUTFChars(env,value,0);FILTER_REQUIRE(text&&streq(text,"fixture.action.A"));
+         (*env)->ReleaseStringUTFChars(env,value,text);(*env)->DeleteLocalRef(env,value);}
+        args[0].i=1;value=(*env)->CallObjectMethodA(env,first,get,args);
+        {const char* text=(*env)->GetStringUTFChars(env,value,0);FILTER_REQUIRE(text&&streq(text,"fixture.action.B"));
+         (*env)->ReleaseStringUTFChars(env,value,text);(*env)->DeleteLocalRef(env,value);}
+        unicode=(*env)->NewString(env,units,3);again=(*env)->NewString(env,units,3);FILTER_REQUIRE(unicode&&again);
+        args[0].l=unicode;(*env)->CallVoidMethodA(env,first,add,args);(*env)->DeleteLocalRef(env,unicode);
+        args[0].l=again;FILTER_REQUIRE((*env)->CallBooleanMethodA(env,first,has,args)==JNI_TRUE);
+        FILTER_REQUIRE((*env)->CallIntMethodA(env,first,count,0)==3&&(*env)->CallIntMethodA(env,second,count,0)==1);
+        args[0].i=2;value=(*env)->CallObjectMethodA(env,first,get,args);
+        {const jchar* text=(*env)->GetStringChars(env,value,0);FILTER_REQUIRE(text&&(*env)->GetStringLength(env,value)==3&&text[0]==0x78&&text[1]==0&&text[2]==0xd800);
+         (*env)->ReleaseStringChars(env,value,text);(*env)->DeleteLocalRef(env,value);}
+        args[0].l=0;FILTER_REQUIRE((*env)->CallBooleanMethodA(env,first,has,args)==JNI_FALSE&&(*env)->CallBooleanMethodA(env,first,match,args)==JNI_FALSE);
+        (*env)->CallVoidMethodA(env,first,add,args);FILTER_ERROR("java/lang/NullPointerException");
+        FILTER_REQUIRE((*env)->CallIntMethodA(env,first,count,0)==3);
+        args[0].i=-1;value=(*env)->CallObjectMethodA(env,first,get,args);
+        if(value){r->fail_step=28;return (0x5200|28);}FILTER_ERROR("java/lang/IndexOutOfBoundsException");
+        args[0].i=3;value=(*env)->CallObjectMethodA(env,first,get,args);
+        if(value){r->fail_step=28;return (0x5200|28);}FILTER_ERROR("java/lang/IndexOutOfBoundsException");
+        args[0].l=0;value=(*env)->NewObjectA(env,filter,named,args);
+        if(value){r->fail_step=28;return (0x5200|28);}FILTER_ERROR("java/lang/NullPointerException");
+        FILTER_REQUIRE((*env)->CallIntMethodA(env,second,count,0)==1);
+        {jobject locals[]={first,second,again,filter};unsigned int i;for(i=0;i<sizeof(locals)/sizeof(locals[0]);++i)(*env)->DeleteLocalRef(env,locals[i]);}
+        FILTER_REQUIRE(1);report_set(r,28);
+#undef FILTER_ERROR
+#undef FILTER_REQUIRE
     }
     r->fail_step = 0;
     return (jint)JNI_VERSION_1_6;

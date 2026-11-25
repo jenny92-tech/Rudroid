@@ -104,6 +104,19 @@ static const char *error_message(int error) {
         EAI_MEMORY,EAI_NODATA,EAI_NONAME,EAI_SERVICE,EAI_SOCKTYPE,EAI_SYSTEM,EAI_BADFLAGS,EAI_SERVICE,EAI_OVERFLOW};
     return (unsigned)error<sizeof(native)/sizeof(native[0]) ? gai_strerror(native[error]) : "Unknown address error";
 }
+// AOSP bionic libc/dns/resolv/herror.c exposes these exact strings and never
+// reads or changes h_errno/errno.
+static const char *guest_hstrerror(int error) {
+    if (error < 0) return "Resolver internal error";
+    switch (error) {
+        case 0: return "Resolver Error 0 (no error)";
+        case HOST_NOT_FOUND: return "Unknown host";
+        case TRY_AGAIN: return "Host name lookup failure";
+        case NO_RECOVERY: return "Unknown server error";
+        case NO_DATA: return "No address associated with name";
+        default: return "Unknown resolver error";
+    }
+}
 static void release_addresses(GuestAddrInfo *result) {
     // Accept the head returned by this service, not native/foreign addrinfo.
     if (!result) return;
@@ -144,6 +157,9 @@ static const RudroidSymbol symbols[] = {
     RUDROID_SYMBOL("recvmsg", recvmsg)
     RUDROID_SYMBOL("select", select)
     RUDROID_SYMBOL("inet_addr", inet_addr)
+    RUDROID_SYMBOL("inet_ntoa", inet_ntoa)
+    RUDROID_SYMBOL_SAME(inet_aton)
+    RUDROID_SYMBOL("hstrerror", guest_hstrerror)
     RUDROID_SYMBOL("inet_ntop", inet_ntop)
     RUDROID_SYMBOL("inet_pton", inet_pton)
     RUDROID_SYMBOL("if_nametoindex", if_nametoindex)

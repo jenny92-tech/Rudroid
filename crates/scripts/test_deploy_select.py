@@ -209,7 +209,7 @@ class DeploySelectionTests(unittest.TestCase):
         self.assertEqual(subprocess.run(verify, capture_output=True).returncode, 1)
 
     def test_markers_match_the_loader_list(self):
-        source = (SCRIPTS.parent / "project/unity_loader/src/lib.rs").read_text()
+        source = (SCRIPTS.parent / "host/src/lib.rs").read_text()
         block = re.search(r"TEST_BUILD_MARKERS: \[&str; \d+\] =\s*\[(.*?)\];", source, re.S)
         self.assertIsNotNone(block)
         self.assertEqual(tuple(re.findall(r'"([^"]+)"', block.group(1))), TEST_BUILD_MARKERS)

@@ -7,8 +7,8 @@ use std::cell::Cell;
 use std::ffi::{c_void, CStr};
 use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use rudroid_common::arm64_detour::Original;
-use rudroid_common::gamepatch_support::{install_detour, InstallEvent};
-use rudroid_common::il2cpp::{Class, Field, Il2cpp, Method, Type, TYPE_BOOLEAN, TYPE_VOID};
+use rudroid_unity_common::gamepatch_support::{install_detour, InstallEvent};
+use rudroid_unity_common::il2cpp::{Class, Field, Il2cpp, Method, Type, TYPE_BOOLEAN, TYPE_VOID};
 use super::{SilksongFeatures, UpdateFn};
 
 const BEHAVIOR: &str = "skip_launcher_disclaimer + load_main_menu_directly";
@@ -24,8 +24,7 @@ thread_local! {
     static PROGRESS: Cell<(usize, Progress)> = const { Cell::new((0, Progress { updates: 0, accepted: false, attempted: false })) };
     static BUSY: Cell<bool> = const { Cell::new(false) };
 }
-struct BusyGuard;
-impl Drop for BusyGuard { fn drop(&mut self) { BUSY.with(|v| v.set(false)); } }
+use rudroid_unity_common::gamepatch_support::ReentryGuard;
 
 #[derive(Clone, Copy)]
 struct Engine {
@@ -190,8 +189,8 @@ unsafe fn callback(receiver: *mut c_void, mi: *mut c_void, starting: bool) {
     }
     if receiver.is_null() || STOPPED.load(Ordering::Acquire) { return; }
     let Some(engine) = *super::lock(&ENGINE) else { return; };
-    if !engine.api.thread_attached() || BUSY.with(|v| v.replace(true)) { return; }
-    let _guard = BusyGuard;
+    if !engine.api.thread_attached() { return; }
+    let Some(_guard) = ReentryGuard::enter(&BUSY) else { return; };
     let identity = receiver as usize;
     let mut progress = PROGRESS.with(|v| {
         let (id, p) = v.get(); if starting || id != identity { Progress::default() } else { p }

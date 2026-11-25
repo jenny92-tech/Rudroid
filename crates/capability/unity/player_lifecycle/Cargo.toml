@@ -9,5 +9,9 @@ description = "Shared Unity player lifecycle for engine profile capabilities (pl
 [lib]
 path = "src/lib.rs"
 
+[features]
+diag-probes = []
+
 [dependencies]
 rudroid-common = { path = "../../../common" }
+rudroid-unity-common = { path = "../common" }

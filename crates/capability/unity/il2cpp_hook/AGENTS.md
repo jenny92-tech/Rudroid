@@ -6,10 +6,10 @@
 Capability `il2cpp_patch`, kind `runtime`, no `requires`; deployed for Silksong. `unity_memory_policy`, `silksong_unity6`, `hollow_knight_viewport` and `vampire_survivors` require it because only it fires `Il2cppReady`.
 
 ## Design
-- Legacy `[[il2cpp_patch]]` entries (dotted Host API keys, C++ defaults and filter, at most 8) and named `[il2cpp_hooks]` (HostConfig object only) both load. Legacy requests persist until successful init, then common resolves exact assemblies, unique overloads and complete signatures before installing scale/freeze/force_return/trace/bypass. Unsupported shapes/fields/builds produce rejection diagnostics.
+- Legacy `[[il2cpp_patch]]` entries (dotted Host API keys, C++ defaults and filter, at most 8) and named `[il2cpp_hooks]` (HostConfig object only) both load. Legacy requests persist until successful init, then unity-common resolves exact assemblies, unique overloads and complete signatures before installing scale/freeze/force_return/trace/bypass. Unsupported shapes/fields/builds produce rejection diagnostics.
 - `HookRegistry::apply_detour` installs through `rudroid_common::arm64_detour`: a direct `B` within ±128 MiB, else a nearby trampoline veneer; `Detour::original` calls the relocated entry.
 - `rudroid_plugin_init` subscribes to `ModuleKind::Il2cpp` and detours `il2cpp_init`. The first nonzero `int` success status fires `Il2cppReady`; zero stays silent so the guest can retry.
-- Legacy `ui_layout.*` uses common's rooted HUD adapter: hide at most sixteen Component fields, copy pivot and move world position/right margin after the original method. Partial movement and overflowing numeric configuration are rejected. A package-gated Silksong TouchManager setter adapter preserves valid arrays and safely handles null arrays/elements; no array or object offsets are guessed.
+- Legacy `ui_layout.*` uses unity-common's rooted HUD adapter: hide at most sixteen Component fields, copy pivot and move world position/right margin after the original method. Partial movement and overflowing numeric configuration are rejected. Silksong owns its package-specific TouchManager subscription.
 - `UnityStopping` cancels extra managed work; metadata/code/trampolines remain process-pinned.
 - Init returns -1 null table, -2 ABI mismatch, -3 rejected subscription; a repeated init returns 0.
 
@@ -24,9 +24,9 @@ Capability `il2cpp_patch`, kind `runtime`, no `requires`; deployed for Silksong.
 
 | Name | Path | Responsibility |
 |------|------|----------------|
-| Manifest | `Cargo.toml` | `cdylib` + `rlib` `il2cpp_patch`; non-harness `detour_fixture` test |
+| Manifest | `Cargo.toml` | `cdylib` + `rlib` `il2cpp_patch`; common, unity-common, host-config; non-harness `detour_fixture` test |
 | Mechanism | `src/lib.rs` | Descriptor, legacy parsing, `HookRegistry`/`Detour`, `Il2cppReady` producer |
-| Configured runtime | `src/configured.rs` | Retains requests, binds initialized module, installs common plans and handles stop events |
+| Configured runtime | `src/configured.rs` | Retains requests, binds initialized module, installs unity-common plans and handles stop events |
 | HUD config | `src/layout_config.rs` | Safe legacy key/default parsing and owned strings/field selectors |
 | Unit tests | `tests/unit/` | Dialects, filter and cap, real detour, producer once/retry/re-entry |
 | Integration tests | `tests/detour_fixture.rs` | aarch64 Linux crash-isolated detour shapes, including elf_load-mapped code |

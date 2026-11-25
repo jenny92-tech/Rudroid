@@ -1,66 +1,58 @@
 # Linux 掌机兼容边界
 
-当前构建与运行目标为 **ELF64 little endian AArch64 + GNU glibc**。
-2026-10-17 在 MiniLoong/RK3566/Mali-G52/LoongOS 1.4.0.36、GLIBC 2.38 完成五标题
-有边界的[实机验收](ACCEPTANCE.md)；不能据此声称已在 GLIBC 2.28、R36S 或所有固件运行。
-必要的 ABI/装载陷阱见[开发规范](../../DEVELOPMENT.md#已知适配陷阱)。
+## 逻辑
 
-2026-10-19 另在 TrimUI 的 Allwinner A523 / Mali-G57 / 986008 KiB RAM /
-Buildroot 2022.05、GLIBC 2.33 上检查。设备树与真实库优先于 PortMaster 中旧的
-A133plus 名称：SDL 2.32.6 使用 KMSDRM，原生输出 1280×720。
-主窗口须由 SDL 完成交换及 page flip，不能只调用原生 `eglSwapBuffers`。
-系统 SDL 未编译 PulseAudio backend，启动器沿用 ALSA 的 Pulse 插件连接现有声卡服务。
-系统 SDL 不带 Wayland backend，Vulkan loader 也未编译 Wayland surface 入口。
-可选私有包提供 SDL 2.32.6 和通用 Vulkan loader，复用已安装的 PortMaster Weston
-13.0.90 与 Mali-G57 Vulkan 1.2.225。两客户端的直接 GLIBC 需求为 **2.29**，
-独立审计，不扩大核心 kit 的 GLIBC≤2.28 声明。旧版上游 SDL 强制初始化本固件
-缺少的 Wayland EGL，不能只按 SDL 版本号推定可用；最终以原生探测和游戏验证为准。
+Rudroid 生产目标是一层明确的用户态 ABI，不是“ARM64 芯片就能跑”：
 
-此固件只有 DRM card0，没有 renderD128；WSI 仅在默认 render 节点不存在时用
-card0 分配 GBM 缓冲，不申请 modeset/DRM master。多 VkSurfaceKHR 共用同一原生
-surface 的同步对象，最后 owner 才释放。真实交换链/GPU 回读与丝之歌关卡已验证。
-五个 Rudroid 游戏启动器统一默认 GLES、75% 渲染；丝之歌、吸血鬼保留手动 Vulkan，
-原生探测通过也不自动开启。TrimUI 丝之歌的 Vulkan 画面错误尚未修复。
-原生探测通过不代表游戏画面合格，实际范围见[验收](ACCEPTANCE.md)。系统库和 GPU 驱动保持原样。
+**ELF64 LE AArch64 + GNU glibc**，核心 kit 直接 VERNEED 上限 **GLIBC 2.28**
+（部署门禁静态审计）。其上每一层（内核页大小、SDL/EGL/GPU、guest Bionic、
+音画输入、Unity 退出）各自有“当前怎么处理 / 什么仍未证明”的边界；下层绿
+不能代替上层验收。
 
-## 系统要求
+实机范围与局限归 [ACCEPTANCE](ACCEPTANCE.md)；装载/交换等踩坑归
+[DEVELOPMENT · 已知适配陷阱](../../DEVELOPMENT.md#已知适配陷阱)；
+构建与 `linux_abi.py` 命令归
+[BUILD-DOCKER · 生产部署](../../BUILD-DOCKER.md#生产部署顺序)。
+
+已测设备（证据，不是通用保证）：
+
+- 2026-10-17 MiniLoong / RK3566 / Mali-G52 / LoongOS 1.4.0.36 / GLIBC 2.38 — 五标题有界路径。
+- 2026-10-19 TrimUI / A523 / Mali-G57 / ~1 GiB / Buildroot 2022.05 / GLIBC 2.33 — SDL 2.32.6 KMSDRM 1280×720；系统无 Pulse/Wayland backend 时用局部 SDL+Vulkan loader（客户端 GLIBC **2.29**，不抬高核心 kit 声明）。细节与未修 Vulkan 画面见验收页。
+
+不能据此声称 GLIBC 2.28 固件、R36S 或未登记板型已通过。
+
+## 分层边界
 
 | 层 | 当前处理 | 未支持或仍需验证 |
 |---|---|---|
-| CPU / 用户态 | ELF64 LE AArch64，GNU target；固定入口不传 target-cpu=native | ARM32、musl、其他架构；64 位芯片不代表固件提供 64 位库。 |
-| GNU libc | 当前生产库存直接 VERNEED 最高 **GLIBC_2.28**，含 weak statx，部署门禁逐次静态审计 | 2.17–2.27 不能沿用此产物；降低真实基线需兼容 sysroot 的独立构建及验收。 |
-| 内核 / 页大小 | 映射器读取 native page size、拒绝页级 W/X 冲突；按实际系统处理 syscall 失败 | 多种旧内核与 16/64 KiB 页设备未实测；4 KiB 链接布局不能直接保证大页可运行。 |
-| SDL / EGL / GLES | SDL SONAME `libSDL2-2.0.so.0`；ES context 3.2→2.0 尝试，共享窗口/context 与几何 | 真实 SDL、EGL、libgcc、GPU 驱动及传递依赖须沿目标 DT_NEEDED 核验。Docker Mesa 不证明硬件 GPU 性能。 |
-| ELF / guest ABI | Bionic 版本化导入、RELR/RELA/APS2、FILE/线程/同步 facade、初始化与析构 | 不是 Android 系统 linker；TLS、自动依赖发现、任意 guest 文件 dlopen 等见[能力边界](MIGRATION-MAP.md#剩余差异与未支持范围)。 |
-| 音频 / 输入 | 共享 AudioOutput/InputSource，当前实现为 SDL，FMOD 等复用；真实 PCM、轴/事件与退出有专项 | 扬声器品质、全部设备、物理拔插和标题全部动作需独立验收。NDK sensor 明确无设备，媒体 fallback 不解码视频。 |
-| Unity / 退出 | 共用 player 生命周期；nativeDone 前停止托管工作，等待在途回调，音频 stop/join 后释放 | 成功 capability、guest 代码和 SDL session 保持进程有效期；不在有线程/函数指针时 dlclose。五 build 以外、Mono 与全流程另验收。 |
+| CPU / 用户态 | ELF64 LE AArch64，GNU target；固定入口不传 `target-cpu=native` | ARM32、musl、其他架构；芯片 64 位 ≠ 固件有 64 位库 |
+| GNU libc | 生产库存直接 VERNEED ≤ **2.28**（含 weak statx），部署逐次审计 | 2.17–2.27 不能沿用此产物；降基线要兼容 sysroot 另构建并验收 |
+| 内核 / 页大小 | 读 native page size；拒绝页级 W/X 冲突；syscall 失败按实系统处理 | 多旧内核与 16/64 KiB 页未实测 |
+| SDL / EGL / GLES | SONAME `libSDL2-2.0.so.0`；ES 3.2→2.0；共享窗口/context | 沿目标 DT_NEEDED 核真实驱动链；Docker Mesa ≠ 硬件性能；主窗口交换须走 SDL（KMSDRM 含 page flip） |
+| ELF / guest ABI | Bionic 版本化导入、RELR/RELA/APS2、FILE/线程 facade、init/fini | 非 Android 系统 linker；TLS/自动依赖/任意路径 dlopen 等见 [MIGRATION-MAP](MIGRATION-MAP.md#剩余差异与未支持范围) |
+| 音频 / 输入 | 共享 AudioOutput/InputSource（现实现为 SDL），FMOD 等复用 | 听感、全设备、热插拔、全动作另验；NDK sensor 无设备；media fallback 不解码视频 |
+| Unity / 退出 | 共用 player 生命周期；nativeDone 前停托管、等回调；音频 stop/join 后释放 | 成功 capability/guest/SDL 保持进程有效期；有界 Mono 见 [UNITY-MONO](UNITY-MONO.md) |
 
-Android 的 `free@LIBC / libc.so` 是 Bionic ABI 要求，不靠升级掌机 glibc 或按裸名字
-查宿主解决；layout/version 不同须在边界转换。barrier/spin 已实现，但 process-shared
-同步、Android 私有 TCB 和完整 NPTL 兼容不因此成立。
+补充：
 
-Rust target 的编译器支持基线不等于链接后 ELF 的实际基线。以 VERNEED/DT_NEEDED
-和目标真实文件为准；weak binding 不会自动消除版本节点，本项目采用保守上限。
-固定 ABI 依据见 [Android libc 版本表](https://android.googlesource.com/platform/bionic/+/android-15.0.0_r1/libc/libc.map.txt)。
+- Android `free@LIBC / libc.so` 是 Bionic ABI，不靠升级掌机 glibc 或裸名 `dlsym` 解决；layout/version 在边界转换。
+- barrier/spin 已实现 ≠ process-shared / Android TCB / 完整 NPTL。
+- 编译器 target 基线 ≠ 链接后 ELF 基线；以 VERNEED/DT_NEEDED 与目标实文件为准。AOSP 参照：[libc.map.txt](https://android.googlesource.com/platform/bionic/+/android-15.0.0_r1/libc/libc.map.txt)。
 
-## 交付与固件检查
+图形默认与 Vulkan 准入（五标题 GLES 75%；丝之歌/吸血鬼手动 Vulkan 门禁）见
+[RUNTIME-POLICY](RUNTIME-POLICY.md#可选-vulkan-后端) 与 [ACCEPTANCE](ACCEPTANCE.md)。
+TrimUI 私有 Weston、A523 丝之歌全尺寸合成等策略也落在那两处，不在本文展开。
 
-完整构建、成员选择、manifest、test-marker 与 GLIBC 审计只按[生产部署流程](../../BUILD-DOCKER.md#生产部署顺序)执行。
-`cargo test` 可能留下测试 feature 的 cdylib，部署前必须纯生产整套重建；不能只换单个旧库。
+## 交付时查什么
 
-```sh
-python3 crates/scripts/linux_abi.py --dir /path/to/kit --max-glibc 2.28 --output /path/to/abi-report.json
-python3 crates/scripts/linux_abi.py --file /path/to/target/libSDL2-2.0.so.0 --max-glibc 2.28
-```
+生产部署顺序（整套重建、成员、test-marker、GLIBC 审计）只走 BUILD-DOCKER。
+`cargo test` 可能留下测试 feature 的 cdylib，不能只换单个旧库交付。
 
-从仓库根执行，路径替换为实际文件。工具静态读取 PT_INTERP、DT_NEEDED、GNU
-版本/导入表，不运行 ELF/ldd。deploy-select 在修改部署目录前拒绝超限、错误架构、
-缺审计表或测试成员；原目录保留。Mach-O 流程独立，不等于 Linux 支持。
+`linux_abi.py` 静态读 PT_INTERP、DT_NEEDED、GNU 版本表，不跑 ELF/ldd；
+deploy-select 在改部署目录前拒绝超限/错架构/缺表/测试成员。报告只覆盖所给文件的
+**直接**需求，仍须沿 SDL/EGL/GLES/libz/libgcc/驱动链核验。`--max-glibc 2.17`
+只拒绝超限，不降级二进制。缺依赖优先游戏目录局部库与 `LD_LIBRARY_PATH`/shim；
+不得借兼容之名换系统 libc/GPU 或改固定构建镜像。
 
-`--max-glibc 2.17` 只检查并拒绝当前超限产物，不降级二进制。若固件缺所需依赖，
-优先游戏目录局部部署与 LD_LIBRARY_PATH/shim；不得以兼容修复名义替换系统 libc/GPU
-或自动更换固定镜像、安装工具链。镜像约束见[构建指南](../../BUILD-DOCKER.md)。
-
-报告只覆盖所给文件的直接需求，仍须沿 SDL/EGL/GLES/libz/libgcc/驱动的实际依赖链
-核验一致性。syscall 可用性、显示/音频/输入、资源上限与游戏退出均在目标固件测定。
-新设备执行[移植预检](HANDHELD-PORTING-WORKFLOW.md)，不复用其他设备的一句“已通过”。
+syscall、显示/音频/输入、资源上限与退出均在目标固件测定。新设备走
+[移植预检](HANDHELD-PORTING-WORKFLOW.md)，不复用他机一句“已通过”。

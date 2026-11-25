@@ -4,9 +4,10 @@
 use super::{RefTarget, Session};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
 
 pub(super) enum Buffer {
-    Owned(Box<[UnsafeCell<u8>]>),
+    Owned { bytes: Box<[UnsafeCell<u8>]>, zero_lock: Arc<Mutex<()>> },
     // JNI NewDirectByteBuffer contract: the native caller keeps this memory
     // valid for every Java reference to the buffer and synchronizes native
     // writes with every JNI/Java read. This is not a Rust owner.
@@ -14,10 +15,10 @@ pub(super) enum Buffer {
 }
 impl Buffer {
     fn address(&self) -> *mut c_void {
-        match self { Self::Owned(bytes) => bytes.as_ptr().cast_mut().cast(), Self::Borrowed { address, .. } => *address as *mut c_void }
+        match self { Self::Owned { bytes, .. } => bytes.as_ptr().cast_mut().cast(), Self::Borrowed { address, .. } => *address as *mut c_void }
     }
     fn capacity(&self) -> i64 {
-        match self { Self::Owned(bytes) => bytes.len() as i64, Self::Borrowed { capacity, .. } => *capacity }
+        match self { Self::Owned { bytes, .. } => bytes.len() as i64, Self::Borrowed { capacity, .. } => *capacity }
     }
 }
 impl Session {
@@ -33,7 +34,7 @@ impl Session {
         let mut bytes = Vec::new();
         if bytes.try_reserve_exact(capacity).is_err() { self.set_pending("java/lang/OutOfMemoryError", "direct buffer allocation failed"); return std::ptr::null_mut(); }
         bytes.resize_with(capacity, || UnsafeCell::new(0));
-        self.direct_buffer(Buffer::Owned(bytes.into_boxed_slice()))
+        self.direct_buffer(Buffer::Owned { bytes: bytes.into_boxed_slice(), zero_lock: Arc::new(Mutex::new(())) })
     }
     pub(super) fn direct_buffer_address(&self, object: *mut c_void) -> *mut c_void {
         if self.blocked_by_pending("GetDirectBufferAddress") { return std::ptr::null_mut(); }
@@ -45,16 +46,24 @@ impl Session {
         let Some(RefTarget::Object(id)) = self.resolve(object) else { return -1; };
         self.objects.lock().unwrap().get(&id).and_then(|object| object.direct.as_ref()).map_or(-1, Buffer::capacity)
     }
-    pub(super) fn zero_owned_buffer(&self,object:*mut c_void){
-        if self.blocked_by_pending("ByteBuffer._rudroidZeroOwned"){return;}
-        let root=self.root_reference(object);
-        let Some(RefTarget::Object(id))=root.as_ref().map(|r|r.target)else{self.set_pending("java/lang/IllegalArgumentException","not an owned direct buffer");return;};
-        let objects=self.objects.lock().unwrap();
-        let Some(Buffer::Owned(bytes))=objects.get(&id).and_then(|o|o.direct.as_ref())else{drop(objects);self.set_pending("java/lang/IllegalArgumentException","not an owned direct buffer");return;};
-        // SAFETY: owned stable allocation, rooted throughout, VM access serialized by the
-        // object lock. JNI/native consumers must synchronize raw buffer access with Java
-        // operations; the FMOD producer calls this only before its synchronous native mix.
-        for byte in bytes.iter(){unsafe{byte.get().write(0)};}
+    pub(super) fn zero_owned_buffer(&self, object: *mut c_void) {
+        if self.blocked_by_pending("ByteBuffer._rudroidZeroOwned") { return; }
+        let root = self.root_reference(object);
+        let owned = root.as_ref().and_then(|root| {
+            let RefTarget::Object(id) = root.target else { return None; };
+            let objects = self.objects.lock().unwrap_or_else(|p| p.into_inner());
+            let Buffer::Owned { bytes, zero_lock } = objects.get(&id)?.direct.as_ref()? else { return None; };
+            Some((bytes.as_ptr().cast_mut().cast::<u8>(), bytes.len(), Arc::clone(zero_lock)))
+        });
+        let Some((address, length, zero_lock)) = owned else {
+            self.set_pending("java/lang/IllegalArgumentException", "not an owned direct buffer");
+            return;
+        };
+        let _guard = zero_lock.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: root pins the object's immutable buffer allocation through this
+        // write. UnsafeCell permits mutation, concurrent VM clears share zero_lock,
+        // and JNI clients synchronize external access with Java buffer operations.
+        unsafe { address.write_bytes(0, length) };
     }
 }
 pub(super) mod shims {

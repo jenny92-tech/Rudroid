@@ -1,3 +1,6 @@
+//! INPUT: typed reply records or serialized catalog bytes
+//! OUTPUT: versioned reply catalog encoding and decoding
+//! POS: shared file format used by the catalog capability
 //! Reply Catalog binary format: little-endian, versioned, rebuild-on-change.
 //!
 //! Lives in its own dependency-free crate so both the catalog cdylib and its

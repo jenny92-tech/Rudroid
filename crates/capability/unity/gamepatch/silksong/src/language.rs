@@ -4,8 +4,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::{cell::Cell, ffi::{c_void, CStr}, sync::{atomic::{AtomicBool, Ordering}, Mutex}};
-use rudroid_common::{arm64_detour::Original, gamepatch_support::{install_detour, InstallEvent},
-    il2cpp::{Class, GcHandles, Il2cpp, Method, Type, TYPE_BOOLEAN, TYPE_STRING, TYPE_VOID}};
+use rudroid_common::arm64_detour::Original;
+use rudroid_unity_common::{
+    gamepatch_support::{install_detour, InstallEvent, ReentryGuard},
+    il2cpp::{Class, GcHandles, Il2cpp, Method, Type, TYPE_BOOLEAN, TYPE_STRING, TYPE_VOID},
+};
 
 const BEHAVIOR: &str = "persist_selected_language";
 type Switch = unsafe extern "C-unwind" fn(i32, *mut c_void) -> bool;
@@ -13,8 +16,6 @@ static ORIGINAL: Original<Switch> = Original::new();
 static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 static STOPPED: AtomicBool = AtomicBool::new(true);
 thread_local! { static BUSY: Cell<bool> = const { Cell::new(false) }; }
-struct Guard;
-impl Drop for Guard { fn drop(&mut self) { BUSY.with(|value| value.set(false)); } }
 
 #[derive(Clone, Copy)]
 struct Engine { api: Il2cpp, roots: GcHandles, code: Class, current: Method,
@@ -101,8 +102,8 @@ unsafe extern "C-unwind" fn switch(value: i32, method: *mut c_void) -> bool {
     let changed = unsafe { original(value, method) };
     if !changed || STOPPED.load(Ordering::Acquire) { return changed; }
     let Some(engine) = *super::lock(&ENGINE) else { return changed; };
-    if !engine.api.thread_attached() || BUSY.with(|value| value.replace(true)) { return changed; }
-    let _guard = Guard;
+    if !engine.api.thread_attached() { return changed; }
+    let Some(_guard) = ReentryGuard::enter(&BUSY) else { return changed; };
     // SAFETY: successful original callback on its attached Unity thread;
     // no lock spans a managed call and no object survives this scope.
     match unsafe { engine.persist() } {

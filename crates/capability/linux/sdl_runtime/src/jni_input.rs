@@ -26,6 +26,7 @@ struct Bindings {
     extra_fields: [usize; 9],
     notifications: [Method; 3],
     vm: JavaVm,
+    trace_touch: bool,
 }
 static BINDINGS: OnceLock<Bindings> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -101,9 +102,27 @@ struct Input {
     notifications: Vec<(usize, i32)>,
     mouse: MouseState,
     keyboard_chord: u8,
+    touch_trace: TouchTrace,
     // SDL subsystem and controller handles are creator-thread owners.
     _gamepads: Vec<sdl2::controller::GameController>,
     _controller_subsystem: Option<sdl2::GameControllerSubsystem>,
+}
+
+/// Per-session private diagnostics, never a render or input scheduling clock.
+/// A batch ends only when poll returns null. PlayerInput drains at most 64
+/// events before rendering: a capped drain can span renders with the same
+/// batch number, so this label alone never asserts a rendered-frame count.
+#[derive(Default)]
+struct TouchTrace { enabled: bool, emitted: u8, batch: u64 }
+impl TouchTrace {
+    fn empty_poll(&mut self) {
+        if self.enabled { self.batch = self.batch.saturating_add(1); }
+    }
+    fn take(&mut self, native_touch: bool) -> Option<u64> {
+        if !self.enabled || !native_touch || self.emitted >= 2 { return None; }
+        self.emitted += 1;
+        Some(self.batch)
+    }
 }
 #[derive(Default)]
 struct MouseState {
@@ -520,6 +539,11 @@ pub(super) fn activate(
             notifications: vec![],
             mouse: MouseState::default(),
             keyboard_chord: 0,
+            touch_trace: TouchTrace {
+                enabled: rudroid_common::logging::diagnostics_enabled()
+                    && BINDINGS.get().is_some_and(|bindings| bindings.trace_touch),
+                ..TouchTrace::default()
+            },
             _gamepads: gamepads,
             _controller_subsystem: controller_subsystem,
         });
@@ -606,6 +630,7 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
     let event = INPUT.with(|input| {
         let mut input = input.borrow_mut();
         let input = input.as_mut()?;
+        let mut native_touch = false;
         let ms = input.start.elapsed().as_millis().min(i64::MAX as u128) as i64;
         let mut event = if let Some(event) = input.pending.pop_front() {
             Some(event)
@@ -768,20 +793,23 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
                     }
                     S::FingerDown { x, y, .. }
                     | S::FingerUp { x, y, .. }
-                    | S::FingerMotion { x, y, .. } => Some(Event {
-                        motion: true,
-                        action: match native {
-                            S::FingerDown { .. } => 0,
-                            S::FingerUp { .. } => 1,
-                            _ => 2,
-                        },
-                        a: (x * input.width as f32) as i32,
-                        b: (y * input.height as f32) as i32,
-                        repeat: 0,
-                        device: 0,
-                        gamepad: false,
-                        ..Event::default()
-                    }),
+                    | S::FingerMotion { x, y, .. } => {
+                        native_touch = matches!(native, S::FingerDown { .. } | S::FingerUp { .. });
+                        Some(Event {
+                            motion: true,
+                            action: match native {
+                                S::FingerDown { .. } => 0,
+                                S::FingerUp { .. } => 1,
+                                _ => 2,
+                            },
+                            a: (x * input.width as f32) as i32,
+                            b: (y * input.height as f32) as i32,
+                            repeat: 0,
+                            device: 0,
+                            gamepad: false,
+                            ..Event::default()
+                        })
+                    },
                     _ => None,
                 };
                 if event.is_some() {
@@ -789,7 +817,10 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
                 }
             }
         }
-        let mut event = event?;
+        let Some(mut event) = event else {
+            input.touch_trace.empty_poll();
+            return None;
+        };
         // Android input and Unity's native clock must share CLOCK_MONOTONIC.
         // Keep the private Instant only for relative test-script scheduling.
         let timestamp_ms = rudroid_common::clock::monotonic_nanos() / 1_000_000;
@@ -804,7 +835,7 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
                 touch: 0,
             })
             .stamp(&mut event, timestamp_ms);
-        Some((event, timestamp_ms, down))
+        Some((event, timestamp_ms, down, input.touch_trace.take(native_touch)))
     });
     let notices = INPUT.with(|input| {
         input
@@ -821,7 +852,7 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
             &[Arg::int(id)],
         );
     }
-    let Some((event, ms, down)) = event else {
+    let Some((event, ms, down, trace_batch)) = event else {
         return std::ptr::null_mut();
     };
     let bindings = BINDINGS.get().unwrap();
@@ -882,6 +913,21 @@ extern "C" fn poll(env: JniEnv, _class: JObject) -> JObject {
             bindings.extra_fields[8] as *mut c_void,
             event.button_state,
         );
+    }
+    if let Some(batch) = trace_batch.filter(|_| !env.exception_check()) {
+        // These exact typed fields have just been written successfully on
+        // this local object. Their read-only VM accessors allocate/invoke
+        // nothing and use the same declaration IDs; no lookup, exception
+        // clearing, input transformation or dispatch decision is introduced.
+        let action = env.get_int_field(object, bindings.fields[0] as JObject);
+        let source = env.get_int_field(object, bindings.fields[1] as JObject);
+        let event_ms = env.get_long_field(object, bindings.fields[5] as JObject);
+        let down_ms = env.get_long_field(object, bindings.fields[6] as JObject);
+        let x = env.get_float_field(object, bindings.fields[7] as JObject);
+        let y = env.get_float_field(object, bindings.fields[8] as JObject);
+        if !env.exception_check() {
+            rudroid_common::diagnostic!("[SDL] touch VM fields: poll-batch={batch} action={action} x={x} y={y} source={source:#x} event-ms={event_ms} down-ms={down_ms}");
+        }
     }
     object
 }
@@ -1113,6 +1159,7 @@ pub(super) fn register(api: &HostApiV0) -> i32 {
             extra_fields,
             notifications: [added, removed, changed],
             vm,
+            trace_touch: api.config_bool(c"unity.log_input_events", false),
         })
         .is_err()
     {

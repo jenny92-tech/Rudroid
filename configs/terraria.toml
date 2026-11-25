@@ -4,7 +4,7 @@
 # Keep external files in conf/files so existing conf/Players and conf/Worlds
 # remain visible; internal files stay in conf for existing shared_prefs.
 # Directory creation and canonicalization belong to the Android facade.
-# This sample preserves the tested 100% render policy; it is not an FPS claim.
+# This sample preserves the tested 75% render policy; it is not an FPS claim.
 
 [paths]
 game_files = "./gamedata/"

@@ -1,0 +1,20 @@
+[package]
+name = "rudroid-host-core"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Engine-agnostic host kernel: discovery, HostApi, guest bring-up, engine profile runner"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rudroid-common = { path = "../common" }
+rudroid-host-config = { path = "../common/host-config" }
+libloading = "0.8"
+
+[dev-dependencies]
+rudroid-test-support = { path = "../test-support" }
+rudroid-android-elf-load = { path = "../capability/android/elf_load", features = ["test-fixtures"] }
+rudroid-unity-common = { path = "../capability/unity/common" }

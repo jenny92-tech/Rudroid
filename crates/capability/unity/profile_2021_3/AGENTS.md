@@ -3,7 +3,7 @@
 > Unity 2020–2021.3 profile: shared player Spec, exact-image teardown repair and opt-in Swappy fallback.
 
 ## Role
-Capability `unity_2021_3`, kind `unity_profile`; not in `crates/deploy/silksong.txt`. The loader calls `rudroid_plugin_register_jni` in the early JNI phase and `rudroid_plugin_init` in the native phase.
+Capability `unity_2021_3`, kind `engine_profile`; not in `crates/deploy/silksong.txt`. The loader calls `rudroid_plugin_register_jni` in the early JNI phase and `rudroid_plugin_init` in the native phase.
 
 ## Design
 - `ENGINE_SPEC` mirrors C++ `plugins/unity_2021_3`: player `com/unity3d/player/UnityPlayer` with `()V`, initJni `(Landroid/content/Context;)V`, shared reflection/interface proxies, Context-only PAD init, explicit missing network delivery and actual Activity publication.

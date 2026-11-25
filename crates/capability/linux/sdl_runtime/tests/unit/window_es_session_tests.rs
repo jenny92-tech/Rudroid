@@ -449,6 +449,12 @@ fn requested_es_context_is_actually_granted_es_and_drawing_verifies() {
     }
     let (brand_session, _) = create_session_sized(640, 480, 3, 2).unwrap();
     verification_objects_are_reclaimed_on_success_and_every_early_error(&brand_session, false);
+    drop(brand_session);
+    #[cfg(all(target_os = "linux", feature = "diag-probes"))]
+    {
+        super::super::guest_graphics::geometry_map::tests::exercise();
+        super::super::guest_graphics::geometry_alias::tests::cached_named_aliases_use_native_bytes_and_lifetimes();
+    }
 }
 
 #[cfg(target_os = "linux")]

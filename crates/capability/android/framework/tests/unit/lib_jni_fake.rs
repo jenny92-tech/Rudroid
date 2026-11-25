@@ -67,6 +67,7 @@ unsafe extern "C" fn fake_get_env(
         table[25] = fake_new_local_ref as usize;
         table[slot::env::GET_STATIC_METHOD_ID] = fake_get_static_method_id as usize;
         table[slot::env::CALL_STATIC_INT_METHOD_A] = fake_call_static_int as usize;
+        table[116] = fake_call_static_object as usize;
         table[215] = fake_register_natives as usize;
         table[143] = fake_call_static_void as usize;
         table[228] = fake_exception_check as usize;
@@ -144,6 +145,18 @@ unsafe extern "C" fn fake_call_static_void(
     _args: *const rudroid_common::jni_abi::JValue,
 ) {
     record("call_static_void");
+}
+unsafe extern "C" fn fake_call_static_object(
+    _env: *mut c_void,
+    class: *mut c_void,
+    _method: *mut c_void,
+    args: *const rudroid_common::jni_abi::JValue,
+) -> *mut c_void {
+    // The phase-join fixture models the private declareClass RPC. Actual
+    // declaration/lookup behavior is checked by the real-VM process fixture.
+    assert!(!class.is_null() && !args.is_null());
+    record("call_static_object");
+    0x521 as *mut c_void
 }
 unsafe extern "C" fn fake_new_utf16_string(
     _env: *mut c_void,

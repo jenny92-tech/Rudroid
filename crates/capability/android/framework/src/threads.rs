@@ -14,6 +14,7 @@ struct Job {
     deadline: Option<Instant>,
 }
 struct Worker {
+    caller_owned: bool,
     jobs: Mutex<VecDeque<Job>>,
     wake: Condvar,
     stop: AtomicBool,
@@ -175,6 +176,7 @@ extern "C" fn start(env: JniEnv, object: JObject) {
     let handler = env.is_instance_of(object, class);
     super::preferences::delete(env, class);
     let worker = Arc::new(Worker {
+        caller_owned: false,
         jobs: Mutex::new(VecDeque::new()),
         wake: Condvar::new(),
         stop: AtomicBool::new(false),
@@ -394,6 +396,80 @@ extern "C" fn handler_init_current(env: JniEnv, handler: JObject) {
     handler_init(env, handler, looper);
     super::preferences::delete(env, looper);
 }
+
+// The native player owner models a Java thread which has called Looper.prepare.
+// It owns/drives this queue itself: binding it to the UI Looper or spawning a
+// surrogate worker would run Handler callbacks on the wrong thread.
+extern "C" fn caller_begin(env: JniEnv, _class: JObject) -> u8 {
+    let _start = START.lock().unwrap();
+    if CLOSING.load(Ordering::Acquire) || current_id() != 0 { return 0; }
+    let current = super::java::current_ui_looper(env);
+    if !current.is_null() {
+        super::preferences::delete(env, current);
+        return 0;
+    }
+    if env.exception_check() { return 0; }
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    if id == 0 { return 0; }
+    let looper = super::java::allocate(env, c"android/os/Looper");
+    if looper.is_null() || env.exception_check() {
+        super::preferences::delete(env, looper);
+        return 0;
+    }
+    set_id(env, looper, &LOOP_ID, id);
+    let root = global(env, looper);
+    super::preferences::delete(env, looper);
+    if root == 0 || env.exception_check() {
+        delete_global(env, root);
+        return 0;
+    }
+    let worker = Arc::new(Worker {
+        caller_owned: true,
+        jobs: Mutex::new(VecDeque::new()), wake: Condvar::new(),
+        stop: AtomicBool::new(false), safe_cutoff: Mutex::new(None),
+        alive: AtomicBool::new(true), looper: Mutex::new(root),
+        handle: Mutex::new(None),
+    });
+    workers().lock().unwrap().insert(id, worker);
+    CURRENT.with(|current| current.set(id));
+    1
+}
+extern "C" fn caller_drain(env: JniEnv, _class: JObject) {
+    if env.exception_check() { return; }
+    let worker = workers().lock().unwrap().get(&current_id()).cloned();
+    let Some(worker) = worker.filter(|w| w.caller_owned) else { return; };
+    let budget = worker.jobs.lock().unwrap().len();
+    let now = Instant::now();
+    for _ in 0..budget {
+        let job = {
+            let mut jobs = worker.jobs.lock().unwrap();
+            if worker.stop.load(Ordering::Acquire) { break; }
+            let index = jobs.iter().enumerate()
+                .filter_map(|(i, job)| job.deadline.filter(|at| *at <= now).map(|at| (i, at)))
+                .min_by_key(|(_, at)| *at).map(|(i, _)| i);
+            index.and_then(|i| jobs.remove(i))
+        };
+        let Some(job) = job else { break; };
+        // No service lock spans a callback. Reposts wait for the next drain,
+        // and reentrant finish closes the retained queue before the next job.
+        run(env, job.runnable);
+        delete_global(env, job.runnable);
+        if env.exception_check() { break; }
+    }
+}
+extern "C" fn caller_finish(env: JniEnv, _class: JObject) {
+    let id = current_id();
+    let worker = {
+        let mut all = workers().lock().unwrap();
+        if !all.get(&id).is_some_and(|w| w.caller_owned) { return; }
+        all.remove(&id).unwrap()
+    };
+    CURRENT.with(|current| current.set(0));
+    close_queue(env, &worker);
+    worker.alive.store(false, Ordering::Release);
+    let looper = std::mem::take(&mut *worker.looper.lock().unwrap());
+    delete_global(env, looper);
+}
 fn object_field(
     env: JniEnv,
     object: *mut c_void,
@@ -431,6 +507,9 @@ extern "C" fn handler_callback(
     looper: JObject,
     callback: JObject,
 ) {
+    if trace_messages() {
+        rudroid_common::diagnostic!("[JavaMessage] Handler callback constructor: callback_present={}",!callback.is_null());
+    }
     handler_init(env, handler, looper);
     set_object(
         env,
@@ -438,7 +517,10 @@ extern "C" fn handler_callback(
         c"callback",
         c"Landroid/os/Handler$Callback;",
         callback,
-    )
+    );
+    if trace_messages() {
+        rudroid_common::diagnostic!("[JavaMessage] Handler callback constructor complete: pending_exception={}",env.exception_check());
+    }
 }
 extern "C" fn message_obtain(env: JniEnv, _class: JObject) -> JObject {
     super::java::allocate(env, c"android/os/Message")
@@ -497,6 +579,19 @@ extern "C" fn default_callback(
     0
 }
 extern "C" fn dispatch(env: JniEnv, handler: JObject, message: JObject) {
+    // Handler.post messages carry their task in Message.callback. It has
+    // priority over Handler.Callback and handleMessage, even when it throws.
+    // Message.obj is ordinary payload and must never be guessed to be a task.
+    let runnable = get_object(env, message, c"callback", c"Ljava/lang/Runnable;");
+    if trace_messages() {
+        rudroid_common::diagnostic!("[JavaMessage] Message Runnable callback: present={}",!runnable.is_null());
+    }
+    if !runnable.is_null() {
+        run(env, runnable as usize);
+        super::preferences::delete(env, runnable);
+        return;
+    }
+    if env.exception_check() { return; }
     let callback = get_object(env, handler, c"callback", c"Landroid/os/Handler$Callback;");
     let mut consumed = false;
     if !callback.is_null() {
@@ -565,6 +660,9 @@ pub(super) fn post(
     let Some(worker) = worker else {
         return Some(0);
     };
+    let Some(deadline) = Instant::now().checked_add(Duration::from_millis(milliseconds.max(0) as u64)) else {
+        return Some(0);
+    };
     let global = global(env, runnable);
     if global == 0 {
         return Some(0);
@@ -580,7 +678,7 @@ pub(super) fn post(
     }
     jobs.push_back(Job {
         runnable: global,
-        deadline: Instant::now().checked_add(Duration::from_millis(milliseconds.max(0) as u64)),
+        deadline: Some(deadline),
     });
     worker.wake.notify_one();
     Some(1)
@@ -622,6 +720,7 @@ pub(super) fn register(env: JniEnv) -> i32 {
                 (c"arg1", c"I"),
                 (c"arg2", c"I"),
                 (c"obj", c"Ljava/lang/Object;"),
+                (c"callback", c"Ljava/lang/Runnable;"),
                 (c"target", c"Landroid/os/Handler;"),
             ],
         ),
@@ -664,6 +763,14 @@ pub(super) fn register(env: JniEnv) -> i32 {
         }
     }
     for (class, methods) in [
+        (
+            c"org/rudroid/runtime/CallerLooper",
+            vec![
+                Native::new0(c"begin", c"()Z", caller_begin),
+                Native::new0(c"drain", c"()V", caller_drain),
+                Native::new0(c"finish", c"()V", caller_finish),
+            ],
+        ),
         (
             c"android/os/Looper",
             vec![

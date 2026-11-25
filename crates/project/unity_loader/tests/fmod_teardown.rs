@@ -4,10 +4,11 @@
 
 use rudroid_common::jni_env::{Arg, JObject, JniEnv, Native};
 use rudroid_unity_loader::{host_api, phases::Phase};
-use std::{path::Path, sync::atomic::{AtomicBool, AtomicUsize, Ordering}, time::{Duration, Instant}};
+use std::{path::Path, sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering}, time::{Duration, Instant}};
 
 static DEVICE: AtomicUsize = AtomicUsize::new(0);
 static MIXES: AtomicUsize = AtomicUsize::new(0);
+static MIX_RESULT: AtomicI32 = AtomicI32::new(0);
 static ALIVE: AtomicBool = AtomicBool::new(true);
 static AFTER_FREE: AtomicUsize = AtomicUsize::new(0);
 static DRAINED: AtomicBool = AtomicBool::new(false);
@@ -26,7 +27,7 @@ extern "C" fn info(_: JniEnv, _: JObject, index: i32) -> i32 {
 extern "C" fn mix(_: JniEnv, _: JObject, _: JObject) -> i32 {
     if !ALIVE.load(Ordering::Acquire) { AFTER_FREE.fetch_add(1, Ordering::Relaxed); }
     MIXES.fetch_add(1, Ordering::Release);
-    0
+    MIX_RESULT.load(Ordering::Relaxed)
 }
 extern "C" fn open(env: JniEnv, class: JObject, _: i32, _: i32, _: i32) -> JObject {
     env.alloc_object(class)
@@ -84,10 +85,25 @@ fn run_case(kit: &Path, case: &str) {
     let expects_error = matches!(case, "early-error" | "late-error" | "both-errors");
     let compatible_pause = case == "pause-compatible";
     let transient_output_stall = case == "output-stall";
+    // `sdk_fmod.embedded_unity_audio` selects the engine-embedded posture: the
+    // addon keeps the Java surface and the real AudioOutput mixer bridge, while
+    // the engine natives below stay the only fmodGetInfo/fmodProcess provider,
+    // and NO module subscription or SetOutput detour is installed at all.
+    let embedded = case == "embedded";
+    // The original embedded Java pump ignores fmodProcess's int return.
+    MIX_RESULT.store(if embedded { 7 } else { 0 }, Ordering::Release);
     STALLED_WRITES.store(if transient_output_stall { 5 } else { 0 }, Ordering::Release);
     OUTPUT_BLOCKED.store(case == "output-blocked", Ordering::Release);
     RELEASE_NEEDS_MIXER.store(!compatible_pause, Ordering::Release);
-    host_api::install_config(Some(rudroid_host_config::HostConfig::parse("[paths]\nandroid_files='conf'\n").unwrap())).unwrap();
+    host_api::install_config(Some(
+        rudroid_host_config::HostConfig::parse(&format!(
+            "[paths]\nandroid_files='conf'\n{}{}",
+            if embedded { "[sdk_fmod]\n" } else { "" },
+            if embedded { "embedded_unity_audio=true\n" } else { "" },
+        ))
+        .unwrap(),
+    ))
+    .unwrap();
     let host = host_api::table();
     // SAFETY: compiler-built test DSOs remain pinned through every VM callback.
     let libraries: Vec<_> = unsafe {
@@ -104,6 +120,22 @@ fn run_case(kit: &Path, case: &str) {
         }
     }
     let env = host.java_vm().unwrap().get_env(0x10006).unwrap();
+    if embedded {
+        // The selected mode must not publish the addon's empty SDK helper:
+        // `org/fmod/FMOD.init(Landroid/content/Context;)V` was only ever a
+        // registered native, so it has to stay an explicit VM miss here.
+        // (`checkInit` is left unasserted on purpose: the shared VM can still
+        // answer it from the Reply Catalog, which is not the addon's helper and
+        // says nothing about a mixer, a format or an SDK result.)
+        let sdk_class = env.find_class(c"org/fmod/FMOD");
+        assert!(
+            env.static_method(sdk_class, c"init", c"(Landroid/content/Context;)V").is_none(),
+            "embedded mode must not register the empty FMOD.init helper"
+        );
+        assert!(env.exception_check(), "the miss stays an explicit pending exception");
+        env.exception_clear();
+        env.delete_local_ref(sdk_class);
+    }
     assert_eq!(env.register_class(c"org/rudroid/runtime/AudioOutput", &[
         Native::new3(c"open", c"(III)Lorg/rudroid/runtime/AudioOutput;", open),
         Native::new2(c"write", c"(Ljava/nio/ByteBuffer;I)I", write),
@@ -114,7 +146,11 @@ fn run_case(kit: &Path, case: &str) {
         Native::new1(c"fmodProcess", c"(Ljava/nio/ByteBuffer;)I", mix),
     ]), 0);
     let class = env.find_class(c"org/fmod/FMODAudioDevice");
-    let device = env.alloc_object(class);
+    let device = if embedded {
+        let ctor = env.method(class, c"<init>", c"()V").expect("embedded audio constructor");
+        env.new_object(class, ctor, &[])
+    } else { env.alloc_object(class) };
+    assert!(!device.is_null() && !env.exception_check());
     let root = env.new_global_ref(device);
     DEVICE.store(root as usize, Ordering::Release);
     let start = env.method(class, c"start", c"()V").unwrap();
@@ -154,7 +190,7 @@ fn run_case(kit: &Path, case: &str) {
         // cleanup itself must not inject a suspend into a live native drain.
         env.call_boolean(owner, env.method(owner_class, c"nativePause", c"()Z").unwrap(), &[]);
     }
-    let ok = rudroid_common::jni_abi::finish_player(env, owner, owner_class, true);
+    let ok = rudroid_unity_common::finish_player(env, owner, owner_class, true);
     assert_eq!(PAUSES.load(Ordering::Acquire), usize::from(compatible_pause),
         "terminal close must not inject an extra nativePause");
     assert_eq!(ok, !expects_error);
@@ -200,7 +236,7 @@ fn streamed_audio_drains_before_native_owner_release() {
         let source = rudroid_test_support::cargo::ensure_workspace_cdylib(package, stem);
         std::fs::copy(source, kit.join(file)).unwrap();
     }
-    for case in ["normal", "early-error", "late-error", "both-errors", "pause-compatible", "output-stall", "output-blocked"] {
+    for case in ["normal", "early-error", "late-error", "both-errors", "pause-compatible", "output-stall", "output-blocked", "embedded"] {
         let result = std::process::Command::new("timeout").arg("20")
             .arg(std::env::current_exe().unwrap())
             .args(["streamed_audio_drains_before_native_owner_release", "--exact", "--nocapture"])

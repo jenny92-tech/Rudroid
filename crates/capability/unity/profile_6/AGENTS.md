@@ -3,7 +3,7 @@
 > Unity 6 engine profile: a `Spec` literal, the Unity 6 Java services and the runtime-invoke Bionic TLS guard.
 
 ## Role
-Capability `unity_6`, kind `unity_profile`; deployed for Silksong and required by `vampire_survivors`. The loader calls `rudroid_plugin_register_jni` (early JNI phase), then `rudroid_plugin_init` (native phase).
+Capability `unity_6`, kind `engine_profile`; deployed for Silksong and required by `vampire_survivors`. The loader calls `rudroid_plugin_register_jni` (early JNI phase), then `rudroid_plugin_init` (native phase).
 
 ## Design
 - `ENGINE_SPEC` mirrors C++ `plugins/unity_6`: player `UnityPlayerForActivityOrService(Context)`, initJni `(Landroid/content/Context;I)V`, extra `initializeGoogleAr` callback, `currentActivity` published, shared `java::register_6` services.

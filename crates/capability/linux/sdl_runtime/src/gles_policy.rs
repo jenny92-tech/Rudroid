@@ -54,6 +54,13 @@ pub(super) struct Extensions {
     words: Vec<CString>,
     joined: CString,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IntegerOverride {
+    Scalar(i32),
+    /// Vector query whose element count is overridden to 0: return without writing `*out`.
+    NoWrite,
+}
+
 impl Policy {
     fn extension_dirty(&self) -> bool {
         self.binary_disabled
@@ -85,14 +92,19 @@ impl Policy {
             .map_err(|_| "driver extension contains NUL")?;
         Ok(Extensions { words, joined })
     }
-    fn integer(&self, name: u32) -> Option<i32> {
-        if self.binary_disabled && matches!(name, 0x87fe | 0x87ff) {
-            return Some(0);
+    fn integer(&self, name: u32) -> Option<IntegerOverride> {
+        if self.binary_disabled {
+            if name == 0x87fe {
+                return Some(IntegerOverride::Scalar(0));
+            }
+            if name == 0x87ff {
+                return Some(IntegerOverride::NoWrite);
+            }
         }
         self.limits
             .iter()
             .find(|(key, _)| *key == name)
-            .map(|(_, value)| *value)
+            .map(|(_, value)| IntegerOverride::Scalar(*value))
     }
 }
 fn words(value: String) -> Result<Vec<String>, String> {
@@ -181,9 +193,9 @@ pub(super) fn extension(index: u32) -> Option<&'static CStr> {
         .get(index as usize)
         .map(CString::as_c_str)
 }
-pub(super) fn integer(name: u32) -> Option<i32> {
+pub(super) fn integer(name: u32) -> Option<IntegerOverride> {
     if name == 0x821d && extension_dirty() {
-        return Some(EXTENSIONS.get()?.words.len() as i32);
+        return Some(IntegerOverride::Scalar(EXTENSIONS.get()?.words.len() as i32));
     }
     POLICY.get()?.integer(name)
 }

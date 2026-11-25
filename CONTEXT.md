@@ -1,8 +1,9 @@
 # Rudroid 术语
 
 Rudroid 是独立的 ARM64 Android guest 兼容运行时。Rust workspace 在 `crates/`，
-按 android / linux / unity 组织，通过薄 loader 动态加载按需部署的能力。
-当前交付范围见[验收](crates/docs/ACCEPTANCE.md)，模块位置见[workspace 导航](crates/AGENTS.md)。
+按 android / linux / unity / engine 组织，由 host-core 编排、薄 Project CLI 启动，
+按需动态加载部署的能力。当前交付范围见[验收](crates/docs/ACCEPTANCE.md)，
+模块位置见[workspace 导航](crates/AGENTS.md)。
 
 | 术语 | 含义与边界 |
 |---|---|
@@ -10,12 +11,14 @@ Rudroid 是独立的 ARM64 Android guest 兼容运行时。Rust workspace 在 `c
 | Parity | 配置、装载、JNI、音画、输入、生命周期与插件的可观察行为对齐目标；不等于全部 API 已完成或所有游戏已验收。明确记录有意差异和未支持项。 |
 | Core Service | 某项数据与行为的权威来源；一个会话中的多个兼容外观共享状态及资源所有权。 |
 | Compatibility Facade | 向 guest 暴露的 Android/JNI/NDK 等接口；不同接口不各建一套服务或缓存。 |
-| Capability | 可独立部署、带 descriptor 的动态库，按 android/linux/unity 分层；能力间不直接链接。 |
+| Capability | 可独立部署、带 descriptor 的动态库，按 android/linux/unity/engine 分层；能力间不直接链接。 |
 | Android Capability | ELF、Bionic、JNI、framework、资源和 Android addon 等 guest 接口。 |
 | Linux Capability | 宿主后端，例如 SDL 音画输入、日志和已解出的资源包视图。 |
 | Unity Capability | 引擎接入、通用 IL2CPP 机制、版本 profile 和游戏补丁。 |
+| Engine Capability | 非 Unity 的 `Kind::EngineProfile`（当前证明项为 `engine_native_activity`）。 |
 | Android Addon | GMS、Play Core、FMOD、Burst、helpers、XLua 等库级适配；保留既有 `sdk_*` id。 |
-| Project | `unity_loader` 薄入口：读取配置、验证并装配能力和共享服务。 |
+| Host core | `rudroid-host-core`：发现、Host API、guest bring-up、EngineProfile runner；非能力、不部署。 |
+| Project | `unity_loader` 薄 CLI：读参数/配置并调用 host-core；发现与装配在 host-core。 |
 | Title | 具体游戏适配面；当前五标题与版本分别记录，不能从一个标题推断全部游戏支持。 |
 | Host Config | 与现有启动器兼容的 TOML，例如 `[paths]`、`[package]`、`[plugins]`；字段存在不代表运行消费者已实现。 |
 | Reply Catalog | 类/方法/签名对应固定或工厂返回值的同构建二进制；独立于 Host Config，不提供真实在线服务。 |

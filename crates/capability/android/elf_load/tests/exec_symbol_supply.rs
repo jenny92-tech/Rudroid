@@ -128,7 +128,7 @@ impl HostSource {
         let id = unsafe {
             android_elf_load::rudroid_elf_symbol_source_register(
                 c"rudroid86-host".as_ptr(),
-                callback,
+                Some(callback),
                 user,
             )
         };

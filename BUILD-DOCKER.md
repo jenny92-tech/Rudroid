@@ -1,7 +1,11 @@
 # Rudroid Docker build and test
 
 开发顺序、插件边界、生命周期 review 和已知坑见 [开发规范](DEVELOPMENT.md)。
-新设备/游戏的能力复用、预检与分阶段验收见 [掌机游戏移植执行指南](crates/docs/HANDHELD-PORTING-WORKFLOW.md)。本文构建入口仍针对当前 ARM64 Rust kit，其他 ABI/引擎的调查范围不代表已有对应工具链。
+新设备/游戏的能力复用、预检与分阶段验收见 [掌机游戏移植执行指南](crates/docs/HANDHELD-PORTING-WORKFLOW.md)。
+脚本与调试入口的完整登记（含离线工具、禁止平行发明）见 [TOOLING](docs/TOOLING.md)。
+本文构建入口仍针对当前 ARM64 Rust kit，其他 ABI/引擎的调查范围不代表已有对应工具链。
+
+Private SDL geometry, Wayland interval, frame capture and Unity phase measurements use `--diag-probes` on the fixed Docker entry and `RUDROID_DIAGNOSTICS=1` at runtime. Omit `--diag-probes` when building a production kit. The probe selection is included in the kit fingerprint.
 
 ## 构建与定向测试
 
@@ -17,6 +21,21 @@ bash crates/scripts/docker-rust.sh test --sdl -- -p rudroid-unity-loader
 不接受 `--` 参数。
 
 实验 Vulkan kit 使用 `bash crates/scripts/docker-rust.sh build --release --vulkan`。
+`build --release --malisx2` 还构建独立的 `target/release/vulkan-malisx2/` Linux
+ICD。来源固定到 malisx2 0.3.3 的 `d0422ed5…`、对应 Mesa 及带校验的 Rust wraps；
+先校验来源，再在同一固定容器中断网编译，禁止 Meson fallback 下载。构建工具由固定
+镜像配方准备，入口不安装缺失工具。候选 ICD 单独按 GLIBC≤2.33 审计，核心 kit
+仍遵守 2.28 上限。其 `mali_icd.json`、`sources.json`、库和许可须作为整体保留，
+由启动器仅向游戏子进程选择；不能使用上游 Android/Bionic release 包代替 Linux 构建。
+这条构建路径不代表 G52 的任意固件或 Unity 游戏已经通过玩法验收。
+Mesa 生成器使用同 Bullseye 系列、固定官方镜像来源的 CPython 3.11；Rust/GCC 保持原基线。
+配方固定 Meson 1.9.2，并对其 Rust 生成源码的 `CustomTargetIndex` 路径处理做单点
+兼容修正；预检核对该修正，收据保留实际工具后端与构建配方的 SHA256。
+
+只更新独立驱动时使用 `build --release --malisx2 --driver-only`：复用固定构建环境，
+直接构建 ICD，不编译 Rudroid/Cargo 或 WSI。`vulkan-malisx2/` 内的相对 ICD manifest
+可随整个目录移动，供其他 Vulkan 应用按进程选择；使用它不要求安装 Rudroid。
+Wayland 呈现依赖作为另一独立层按需配合，不能把 ICD 与窗口呈现支持混为一项。
 无系统 Wayland 客户端的固件可用 `build --release --portable-wayland`，同一固定环境
 另生成 `target/release/portable-wayland/`：固定 SDL 2.32.6 源码与通用 Vulkan loader。
 不安装系统包或 GPU 驱动；库仅供游戏局部使用，仍需 PortMaster Weston 和实机验收。
@@ -173,6 +192,51 @@ bash crates/scripts/docker-rust.sh test --release -- \
 纯文档修改检查链接与格式即可。源码变更按受影响模块收窄回归；候选固定后统一
 执行必要的跨标题回归，不为每个小改动重跑全部游戏。当前交付的结果与明确ignored
 分类见[验收](crates/docs/ACCEPTANCE.md)，不能用默认跳过掩盖缺环境。
+
+## Bionic API 完整性
+
+先验证当前行为、ABI 边界及真实版本化 AArch64 guest：
+
+```sh
+bash crates/scripts/docker-rust.sh test --release -- -p rudroid-android-bionic
+bash crates/scripts/docker-rust.sh test --release -- -p rudroid-unity-loader --test bionic_guest
+```
+
+单独生成 Android 15 ARM64/API 35 的逐项符号/版本覆盖报告：
+
+```sh
+bash crates/scripts/docker-rust.sh test --release -- -p rudroid-android-bionic --lib \
+  registry::tests::completeness::android_15_coverage_report -- --exact --nocapture
+```
+
+报告固定在 `crates/target/docker-linux-arm64/target/bionic-completeness/android-15-arm64.tsv`，
+复用同一任务输出，不读取游戏。严格的“完整 API 35 ABI”门禁须显式选择：
+
+```sh
+bash crates/scripts/docker-rust.sh test --release -- -p rudroid-android-bionic --lib \
+  registry::tests::completeness::full_android_15_abi_completeness -- --exact --ignored --nocapture
+```
+
+当前实现范围不完整，此严格命令预期非零失败；不能把常规测试通过或这个门禁默认
+ignored 解释成完整 Android 适配。导出覆盖、已有行为验证和未支持项见
+[Bionic 完整性说明](crates/docs/BIONIC-COMPATIBILITY.md)。测试不交付生产库；
+后续若要部署，仍执行上面的完整纯 Release 构建与生产审计。
+
+## WSI 故障边界回归
+
+分配器使用假 GBM 和真实自有 fd 检查错误分类、候选恢复及清理；外部 WSI 夹具
+直接编译固定源码的分派和日志实现，包含原始源码负对照，不加载驱动或创建窗口：
+
+```sh
+bash crates/scripts/docker-rust.sh test --release -- -p rudroid-vulkan-wsi-allocator -p rudroid-native-build
+bash crates/scripts/docker-rust.sh test --release --vulkan -- \
+  -p rudroid-native-build -p rudroid-linux-sdl-runtime \
+  wsi_contract_rejects_null_dispatch_and_keeps_release_errors -- --ignored
+```
+
+第二项需要 `--vulkan` 预先校验的可选源码缓存，常规无 Vulkan 测试明确 ignored。
+测试覆盖 Release 的 ERROR 保留、显式诊断及关闭详细日志时不求值日志参数。
+这些检查不替代完整生产 kit 构建、ABI 审计或具体设备的 surface/游戏验收。
 
 ## 本地真游戏输入
 

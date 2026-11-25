@@ -1,17 +1,17 @@
-//! INPUT:  Java StatFs paths and common's real filesystem capacity snapshot
-//! OUTPUT:  StatFs constructor/restat and cached integer/long block/byte queries
-//! POS:    safe Android storage facade; immutable snapshots belong to the shared VM object
+//! INPUT:  Java StatFs construction and refresh requests
+//! OUTPUT: legacy C++ compatibility capacity: 4096-byte blocks, 32 GiB total/free/available
+//! POS:    Android query facade; backing filesystem and write failures are unchanged
 #![forbid(unsafe_code)]
 use rudroid_common::{
-    filesystem::FilesystemStats,
     jni_abi::declare_field,
     jni_env::{JObject, JniEnv, Native},
 };
 use std::{
     ffi::{c_void, CStr},
-    path::Path,
     sync::OnceLock,
 };
+const COMPAT_BLOCK_SIZE: i64 = 4096;
+const COMPAT_CAPACITY_BYTES: i64 = 32 * 1024 * 1024 * 1024;
 static SNAPSHOT: OnceLock<usize> = OnceLock::new();
 fn error(env: JniEnv, class: &CStr, message: &CStr) {
     if env.exception_check() {
@@ -21,36 +21,16 @@ fn error(env: JniEnv, class: &CStr, message: &CStr) {
     env.throw_new(kind, message);
     env.delete_local_ref(kind);
 }
-extern "C" fn restat(env: JniEnv, object: JObject, path: JObject) {
-    if path.is_null() {
-        error(
-            env,
-            c"java/lang/NullPointerException",
-            c"StatFs path is null",
-        );
-        return;
-    }
-    let Some(Ok(path)) = env.with_string_utf16(path, String::from_utf16) else {
-        error(
-            env,
-            c"java/lang/IllegalArgumentException",
-            c"invalid StatFs path",
-        );
-        return;
-    };
-    let Ok(stats) = FilesystemStats::for_path(Path::new(&path)) else {
-        error(
-            env,
-            c"java/lang/IllegalArgumentException",
-            c"StatFs path is inaccessible or invalid",
-        );
-        return;
-    };
+extern "C" fn restat(env: JniEnv, object: JObject, _path: JObject) {
+    // Match the legacy C++ capacity view used by game startup checks. Path
+    // arguments are intentionally ignored; no filesystem is queried/created.
+    // Host FilesystemStats and actual file writes retain their real semantics.
+    let blocks = COMPAT_CAPACITY_BYTES / COMPAT_BLOCK_SIZE;
     let values = [
-        stats.block_size as i64,
-        stats.blocks as i64,
-        stats.free_blocks as i64,
-        stats.available_blocks as i64,
+        COMPAT_BLOCK_SIZE,
+        blocks,
+        blocks,
+        blocks,
     ];
     let array = env.new_long_array(4);
     if array.is_null() || env.exception_check() {
@@ -59,8 +39,7 @@ extern "C" fn restat(env: JniEnv, object: JObject, path: JObject) {
     }
     env.set_long_array_region(array, 0, &values);
     if !env.exception_check() {
-        // One VM reference publication keeps concurrent readers on a complete
-        // immutable snapshot. A failed restat leaves the old owner untouched.
+        // Publish a complete VM-owned view; refresh releases the previous one.
         env.set_object_field(object, *SNAPSHOT.get().unwrap() as *mut c_void, array);
     }
     env.delete_local_ref(array);

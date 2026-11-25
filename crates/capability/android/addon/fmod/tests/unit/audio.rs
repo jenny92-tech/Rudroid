@@ -14,11 +14,11 @@ fn shutdown_joins_active_and_inactive_entries_before_releasing_owners() {
         let worker_done = Arc::clone(&done);
         let thread = std::thread::spawn(move || {
             while !worker_stop.load(Ordering::Acquire) {
-                std::thread::yield_now();
+                wait_until(&worker_stop, std::time::Instant::now() + Duration::from_secs(1));
             }
             worker_done.store(true, Ordering::Release);
         });
-        let owner = thread.thread().id();
+        let owner = thread.thread().clone();
         runners().lock().unwrap().insert(
             id,
             Arc::new(Runner {

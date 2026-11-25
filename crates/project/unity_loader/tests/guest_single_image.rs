@@ -21,6 +21,9 @@ use rudroid_unity_loader::{guest, load_deploy_dir, runtime, Selection};
 use rudroid_test_support::cargo::{compile_c_fixture, ensure_workspace_cdylib};
 use libloading::{Library, Symbol};
 
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Ticket 81 rework: assembly goes through the shared 73/75 helper —
@@ -92,7 +95,11 @@ fn guest_plan(game_files: &Path) -> guest::GuestPlan {
         game_files.display()
     ))
     .unwrap();
-    guest::GuestPlan::from_config(&config).expect("plan")
+    let mut plan = guest::GuestPlan::from_config(&config).expect("plan");
+    if plan.entries.is_empty() {
+        unity_guest_plan::push_unity_arm64_entries(&mut plan);
+    }
+    plan
 }
 
 #[test]

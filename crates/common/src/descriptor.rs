@@ -17,8 +17,9 @@ pub enum Kind {
     Logging = 1,
     /// Guest Android base surface (`android_base` role).
     AndroidBase = 2,
-    /// Unity engine profile (`unity_2021_3` / `unity_6` role).
-    UnityProfile = 3,
+    /// Engine profile (`unity_2021_3` / `unity_2022_3` / `unity_6` role today;
+    /// discriminant kept for kit/launcher ABI).
+    EngineProfile = 3,
     /// Host platform backend: window/audio/graphics (`platform_sdl_runtime` role).
     Platform = 4,
     /// Android Addon (former `sdk_*`): GMS, Play Core, FMOD, burst, helpers, xlua.
@@ -120,7 +121,7 @@ impl Kind {
     pub const ALL: [Kind; 7] = [
         Kind::Logging,
         Kind::AndroidBase,
-        Kind::UnityProfile,
+        Kind::EngineProfile,
         Kind::Platform,
         Kind::AndroidAddon,
         Kind::Runtime,
@@ -136,7 +137,7 @@ impl Kind {
         match self {
             Kind::Logging => "logging",
             Kind::AndroidBase => "android_base",
-            Kind::UnityProfile => "unity_profile",
+            Kind::EngineProfile => "engine_profile",
             Kind::Platform => "platform",
             Kind::AndroidAddon => "android_addon",
             Kind::Runtime => "runtime",

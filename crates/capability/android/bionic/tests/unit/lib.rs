@@ -32,16 +32,33 @@ fn accepts_only_the_attested_library_version_and_allocators() {
         );
         for name in [
             c"sigqueue",
-            c"freopen",
             c"pthread_barrier_wait",
             c"sem_clockwait",
             c"unknown",
         ] {
             assert_eq!(query(name, c"libc.so", c"LIBC"), 0);
         }
+        for name in [
+            c"freopen", c"tmpnam", c"abs", c"inet_aton", c"hstrerror", c"iscntrl", c"ispunct",
+        ] {
+            assert_ne!(query(name, c"libc.so", c"LIBC"), 0, "{name:?}");
+        }
         for name in [c"sem_wait", c"getaddrinfo", c"newlocale", c"environ"] {
             assert_ne!(query(name,c"libc.so",c"LIBC"),0);
         }
+        for name in [
+            c"nice", c"random", c"sleep", c"execv", c"settimeofday",
+            c"__open_2", c"__openat_2", c"__read_chk", c"__strchr_chk",
+            c"__strcpy_chk", c"__vsprintf_chk", c"_ctype_",
+        ] {
+            assert_ne!(query(name, c"libc.so", c"LIBC"), 0, "{name:?}");
+            assert_eq!(query(name, c"libc.so.6", c"LIBC"), 0, "{name:?}");
+            assert_eq!(query(name, c"libc.so", c"LIBC_P"), 0, "{name:?}");
+        }
+        // nice(0) queries the current process priority without changing it.
+        let nice: unsafe extern "C" fn(std::ffi::c_int) -> std::ffi::c_int =
+            std::mem::transmute(query(c"nice", c"libc.so", c"LIBC"));
+        assert!(nice(0) >= -20);
         assert_ne!(query(c"nexttowardf",c"libm.so",c"LIBC"),0);
         assert_eq!(query(c"nexttowardf",c"libc.so",c"LIBC"),0);
         assert_eq!(query(c"malloc",c"libm.so",c"LIBC"),0);
@@ -59,6 +76,16 @@ fn accepts_only_the_attested_library_version_and_allocators() {
         assert_ne!(query(c"pthread_getname_np", c"libc.so", c"LIBC_O"), 0);
         assert_eq!(query(c"fopen64", c"libc.so", c"LIBC_P"), 0);
         assert_eq!(query(c"__sF", c"libc.so", c"LIBC_N"), 0);
+        for name in [
+            c"_Znwm", c"_Znam", c"_ZdlPv", c"_ZdaPv",
+            c"__cxa_guard_acquire", c"__cxa_guard_release",
+            c"__cxa_guard_abort", c"__cxa_pure_virtual",
+        ] {
+            assert_ne!(query(name, c"libstdc++.so", c"LIBC_O"), 0, "{name:?}");
+            assert_eq!(query(name, c"libc.so", c"LIBC_O"), 0, "{name:?}");
+            assert_eq!(query(name, c"libstdc++.so", c"LIBC"), 0, "{name:?}");
+            assert_eq!(query(name, c"libstdc++.so.6", c"LIBC_O"), 0, "{name:?}");
+        }
         assert_eq!(
             rudroid_bionic_symbol(
                 c"free".as_ptr(),
@@ -265,35 +292,73 @@ fn isspace_classifies_ascii_bytes_without_indexing_outside_the_table() {
 #[test]
 fn android_logging_formats_bounded_text_into_the_shared_callback() {
     unsafe extern "C" { fn rudroid_bionic_install_logger(log: Option<rudroid_common::host_api::LogFn>, diagnostics: i32); }
-    static LENGTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static CAPTURED: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>> = std::sync::Mutex::new(None);
     extern "C" fn capture(tag: HostStr<'_>, message: HostStr<'_>) {
-        let bytes=message.to_cstr().unwrap().to_bytes();
-        if tag.to_cstr()==Some(c"ERROR") { assert_eq!(bytes,b"[shared] important"); }
-        else {
-            assert_eq!(tag.to_cstr(),Some(c"shared"));
-            if bytes.len()<20 { assert_eq!(bytes,b"7 1.25"); }
-        }
-        LENGTH.store(bytes.len(),std::sync::atomic::Ordering::Relaxed);
+        *CAPTURED.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+            tag.to_cstr().unwrap().to_bytes().to_vec(),
+            message.to_cstr().unwrap().to_bytes().to_vec(),
+        ));
         // SAFETY: the calling thread's errno slot.
         unsafe { *libc::__errno_location()=91; }
     }
+    let take = || CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).take().expect("native log callback");
+    // SAFETY: the resolved liblog C prototypes match the native entries;
+    // every format/string buffer is terminated and lives through its call.
     unsafe {
         type Print = unsafe extern "C" fn(std::ffi::c_int,*const c_char,*const c_char,...)->std::ffi::c_int;
+        type Write = unsafe extern "C" fn(std::ffi::c_int,*const c_char,*const c_char)->std::ffi::c_int;
         let print: Print=std::mem::transmute(rudroid_bionic_symbol(c"__android_log_print".as_ptr(),std::ptr::null(),std::ptr::null(),std::ptr::null_mut()));
+        let write: Write=std::mem::transmute(rudroid_bionic_symbol(c"__android_log_write".as_ptr(),std::ptr::null(),std::ptr::null(),std::ptr::null_mut()));
         rudroid_bionic_install_logger(Some(capture),1);
         *libc::__errno_location()=90;
         assert_eq!(print(3,c"shared".as_ptr(),c"%d %.2f".as_ptr(),7i32,1.25f64),-1);
-        assert_eq!(LENGTH.load(std::sync::atomic::Ordering::Relaxed),0);
+        assert!(CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).is_none());
         assert_eq!(print(4,c"shared".as_ptr(),c"%d %.2f".as_ptr(),7i32,1.25f64),1);
+        assert_eq!(take(),(b"shared".to_vec(),b"7 1.25".to_vec()));
         assert_eq!(*libc::__errno_location(),90);
-        let mut large=[b'x';4096]; large[4095]=0;
-        assert_eq!(print(4,c"shared".as_ptr(),c"%s".as_ptr(),large.as_ptr().cast::<c_char>()),1);
-        assert_eq!(LENGTH.load(std::sync::atomic::Ordering::Relaxed),1023);
+
+        let long = std::ffi::CString::new(format!("{}sdk-caller-tail", "x".repeat(3000))).unwrap();
+        let large = std::ffi::CString::new("x".repeat(8192)).unwrap();
+        for priority in [6,7] {
+            // The caller tail must survive both printf formatting and the
+            // ERROR tag wrapper, including the remaining varargs.
+            assert_eq!(print(priority,c"shared".as_ptr(),c"%s:%d:%.2f".as_ptr(),long.as_ptr(),7i32,1.25f64),1);
+            let expected = format!("[shared] {}:7:1.25",long.to_str().unwrap()).into_bytes();
+            assert_eq!(take(),(b"ERROR".to_vec(),expected));
+            assert_eq!(*libc::__errno_location(),90);
+            assert_eq!(print(priority,c"shared".as_ptr(),c"%s".as_ptr(),large.as_ptr()),1);
+            let (tag,message)=take();
+            assert_eq!(tag,b"ERROR");
+            assert_eq!(&message[..9],b"[shared] ");
+            assert_eq!(&message[9..],vec![b'x';4095]);
+        }
+        for priority in [4,5] {
+            assert_eq!(print(priority,c"shared".as_ptr(),c"%s".as_ptr(),large.as_ptr()),1);
+            assert_eq!(take(),(b"shared".to_vec(),vec![b'x';1023]));
+        }
+        assert_eq!(write(6,c"shared".as_ptr(),long.as_ptr()),1);
+        assert_eq!(take(),(b"ERROR".to_vec(),format!("[shared] {}",long.to_str().unwrap()).into_bytes()));
+        assert_eq!(write(6,c"shared".as_ptr(),large.as_ptr()),1);
+        let (tag,message)=take();
+        assert_eq!(tag,b"ERROR");
+        assert_eq!(message.len(),4223);
+        assert_eq!(&message[..9],b"[shared] ");
+        assert!(message[9..].iter().all(|&byte| byte==b'x'));
+
         rudroid_bionic_install_logger(Some(capture),0);
         assert_eq!(print(4,c"shared".as_ptr(),c"suppressed".as_ptr()),-1);
         assert_eq!(print(5,c"shared".as_ptr(),c"suppressed".as_ptr()),-1);
-        assert_eq!(LENGTH.load(std::sync::atomic::Ordering::Relaxed),1023);
+        assert!(CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).is_none());
+        assert_eq!(print(6,c"shared".as_ptr(),c"%s".as_ptr(),large.as_ptr()),1);
+        assert_eq!(take(),(b"ERROR".to_vec(),[b"[shared] ".as_slice(),vec![b'x';1023].as_slice()].concat()));
+        assert_eq!(write(6,c"shared".as_ptr(),large.as_ptr()),1);
+        let (tag,message)=take();
+        assert_eq!(tag,b"ERROR");
+        assert_eq!(message.len(),1151);
+        assert_eq!(&message[..9],b"[shared] ");
+        assert!(message[9..].iter().all(|&byte| byte==b'x'));
         assert_eq!(print(6,c"shared".as_ptr(),c"important".as_ptr()),1);
+        assert_eq!(take(),(b"ERROR".to_vec(),b"[shared] important".to_vec()));
         assert_eq!(*libc::__errno_location(),90);
         rudroid_bionic_install_logger(None,0);
     }
@@ -333,5 +398,81 @@ fn native_allocation_family_round_trips_through_provider_addresses() {
         assert!(!aligned.is_null());
         assert_eq!(aligned as usize % 64, 0);
         free(aligned);
+    }
+}
+
+#[test]
+fn soul_sdk_libc_imports_resolve_and_keep_bionic_bounds() {
+    unsafe {
+        let exact17 = [
+            c"__fgets_chk", c"__strcat_chk", c"__strlcpy_chk", c"__strncat_chk",
+            c"__strncpy_chk", c"__strncpy_chk2", c"__strrchr_chk",
+            c"__system_property_find_nth", c"llabs", c"memmem", c"mincore",
+            c"inotify_init", c"inotify_add_watch", c"popen", c"pclose", c"inet_ntoa",
+            c"strtok",
+        ];
+        assert_eq!(exact17.len(), 17);
+        for name in exact17 {
+            assert_ne!(query(name, c"libc.so", c"LIBC"), 0, "missing {name:?}");
+        }
+
+        type Memmem = unsafe extern "C" fn(*const c_void, usize, *const c_void, usize)
+            -> *mut c_void;
+        let memmem: Memmem = std::mem::transmute(query(c"memmem", c"libc.so", c"LIBC"));
+        let haystack = [1u8, 2, 3, 4];
+        let needle = [3u8, 4];
+        assert_eq!(
+            memmem(haystack.as_ptr().cast(), haystack.len(), needle.as_ptr().cast(), needle.len()),
+            haystack.as_ptr().add(2).cast_mut().cast()
+        );
+
+        type FindNth = unsafe extern "C" fn(u32) -> *const c_void;
+        type PropertyRead = unsafe extern "C" fn(*const c_void, *mut c_char, *mut c_char) -> i32;
+        let find_nth: FindNth = std::mem::transmute(query(c"__system_property_find_nth", c"libc.so", c"LIBC"));
+        let read: PropertyRead = std::mem::transmute(query(c"__system_property_read", c"libc.so", c"LIBC"));
+        let first = find_nth(0);
+        assert!(!first.is_null());
+        assert!(find_nth(3).is_null());
+        let mut name = [0 as c_char; 64];
+        let mut value = [0 as c_char; 64];
+        assert!(read(first, name.as_mut_ptr(), value.as_mut_ptr()) > 0);
+        assert_eq!(CStr::from_ptr(name.as_ptr()).to_bytes(), b"ro.product.cpu.abilist");
+        assert_eq!(CStr::from_ptr(value.as_ptr()).to_bytes(), b"arm64-v8a");
+
+        type Strtok = unsafe extern "C" fn(*mut c_char, *const c_char) -> *mut c_char;
+        let strtok: Strtok = std::mem::transmute(query(c"strtok", c"libc.so", c"LIBC"));
+        let mut text = *b"a,b;;c\0";
+        let delimiters = c",;";
+        let mut tokens = Vec::new();
+        let mut cursor = text.as_mut_ptr().cast::<c_char>();
+        loop {
+            let token = strtok(cursor, delimiters.as_ptr());
+            if token.is_null() { break; }
+            tokens.push(CStr::from_ptr(token).to_bytes().to_vec());
+            cursor = std::ptr::null_mut();
+        }
+        assert_eq!(tokens, [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+}
+
+#[test]
+fn popen_returns_a_bionic_file_facade_for_fgets_chk_and_pclose() {
+    unsafe {
+        type Popen = unsafe extern "C" fn(*const c_char, *const c_char) -> *mut stdio::File;
+        type FgetsChk = unsafe extern "C" fn(*mut c_char, std::ffi::c_int, *mut stdio::File, usize)
+            -> *mut c_char;
+        type Pclose = unsafe extern "C" fn(*mut stdio::File) -> std::ffi::c_int;
+        let open: Popen = std::mem::transmute(query(c"popen", c"libc.so", c"LIBC"));
+        let fgets_chk: FgetsChk = std::mem::transmute(query(c"__fgets_chk", c"libc.so", c"LIBC"));
+        let close: Pclose = std::mem::transmute(query(c"pclose", c"libc.so", c"LIBC"));
+        let file = open(c"printf sdk-shell".as_ptr(), c"r".as_ptr());
+        assert!(!file.is_null());
+        let mut buffer = [0 as c_char; 32];
+        assert_eq!(
+            fgets_chk(buffer.as_mut_ptr(), buffer.len() as std::ffi::c_int, file, buffer.len()),
+            buffer.as_mut_ptr()
+        );
+        assert_eq!(CStr::from_ptr(buffer.as_ptr()).to_bytes(), b"sdk-shell");
+        assert_eq!(close(file), 0);
     }
 }

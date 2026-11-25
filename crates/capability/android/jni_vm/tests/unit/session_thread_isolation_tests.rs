@@ -11,7 +11,7 @@ fn locals_do_not_cross_threads_but_globals_do() {
     let class = session
         .with_thread(|s| {
             let id = s.locals.len() as u32;
-            s.locals.insert(9000, Local { target: RefTarget::Class(7), frame: 0 });
+            s.insert_local(9000, RefTarget::Class(7));
             id
         });
     let _ = class;

@@ -4,7 +4,7 @@
 
 ## Role
 Capability `reply_catalog`, `Kind::Runtime`; package `rudroid-android-reply-catalog` (cdylib + rlib `librudroid_android_reply_catalog.so`, deployed as `libreply_catalog.so` through an alias in `scripts/deploy-select.py`).
-Deploy it with `android_jni_vm`: `android_base`'s session join fails without it. Other capabilities never link it; they use types from [`format/`](format/) and query through `HostApiV0.catalog_query_int/_bool`.
+Deploy it with `android_jni_vm`: `android_base`'s session join fails without it. Other capabilities never link this cdylib or `format/`; they query through `HostApiV0.catalog_query_int/_bool`.
 
 ## Design
 - `build.rs` encodes `format::source::SOURCE_TABLE` into `OUT_DIR/reply_catalog.bin`; `src/lib.rs` embeds it and decodes it once into a process `Arc<Catalog>`.

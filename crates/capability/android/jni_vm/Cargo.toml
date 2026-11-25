@@ -14,7 +14,6 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rudroid-common = { path = "../../../common" }
-rudroid-reply-catalog-format = { path = "../reply_catalog/format" }
 
 [build-dependencies]
 rudroid-native-build = { path = "../../../native-build" }

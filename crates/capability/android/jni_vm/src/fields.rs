@@ -42,7 +42,7 @@ pub(super) struct Object {
     pub fields: HashMap<u64, FieldValue>,
     pub builder: Option<Vec<u8>>,
     // Keep the slot pointer-sized for every non-stream Java object.
-    pub stream: Option<Box<super::stream_buffer::FileStream>>,
+    pub stream: Option<std::sync::Arc<std::sync::Mutex<super::stream_buffer::FileStream>>>,
     pub direct: Option<super::direct_buffers::Buffer>,
     pub marked: Cell<bool>,
     // Collector scratch, accessed only under the heap/liveness locks.
@@ -187,26 +187,32 @@ impl Session {
             let actual = self.object_class(handle, "SetObjectField");
             self.delete_ref(handle, false, "SetObjectField");
             if !actual.is_some_and(|actual| reference_class.is_some_and(|wanted| self.is_subclass(actual, wanted))) {
+                if self.trace_calls.load(std::sync::atomic::Ordering::Relaxed) {
+                    let (class,name,signature)={let fields=self.fields.lock().unwrap();let f=&fields.records[&id];(f.class,f.name.clone(),f.signature.clone())};
+                    self.log(&format!("JNI_FIELD_REJECT {}/{name}{signature} supplied={} thread={:?}",
+                        self.class_name(class),actual.map_or_else(||"<invalid>".into(),|c|self.class_name(c)),std::thread::current().id()));
+                }
                 self.set_pending("java/lang/IllegalArgumentException", "incompatible object field value"); return;
             }
             if is_static { self.pin_target(target); } else { self.retain_edge(target); }
         }
+        let mut live = self.liveness.lock().unwrap();
         let previous = if is_static {
             std::mem::replace(&mut self.fields.lock().unwrap().records.get_mut(&id).unwrap().value, value)
         } else {
             let Some(RefTarget::Object(object)) = _receiver_root.as_ref().map(|root| root.target) else {
-                if let Some(target) = value.reference() { self.release_target_inner(target, true); }
+                if let Some(target) = value.reference() { self.release_locked(&mut live, target, true); }
                 return;
             };
             let mut objects = self.objects.lock().unwrap();
             let Some(object) = objects.get_mut(&object) else {
                 drop(objects);
-                if let Some(target) = value.reference() { self.release_target_inner(target, true); }
+                if let Some(target) = value.reference() { self.release_locked(&mut live, target, true); }
                 return;
             };
             object.fields.insert(id, value).unwrap_or(FieldValue::Object(None))
         };
-        if let Some(target) = previous.reference() { self.release_target_inner(target, !is_static); }
+        if let Some(target) = previous.reference() { self.release_locked(&mut live, target, !is_static); }
     }
 }
 

@@ -1,22 +1,7 @@
 # 掌机游戏移植执行指南
 
 按“已有能力 → 设备/游戏预检 → 最接近案例 → 最小运行 → 功能 → 优化/交付”推进。
-当前实现是 ARM64 LE Android Unity IL2CPP → ARM64 Linux GNU/glibc；调查范围
-可以更广，但 ARM32、Mono、其他引擎/宿主须单独实现和验收。
-
-## 先查已有能力
-
-| 需求 | 复用入口 | 核对内容 |
-|---|---|---|
-| loader/部署 | [unity_loader](../project/unity_loader/AGENTS.md)、[能力表](MIGRATION-MAP.md) | ABI、完整 kit、依赖及装载顺序 |
-| ELF/Bionic/libdl | [elf_load](../capability/android/elf_load/AGENTS.md)、[bionic](../capability/android/bionic/AGENTS.md) | 重定位、导入、版本/布局，区分 Android guest 与 Linux host 库 |
-| JNI/Java/Android | [jni_vm](../capability/android/jni_vm/AGENTS.md)、[framework](../capability/android/framework/AGENTS.md) | 完整描述符、对象/线程、路径、存档与生命周期语义 |
-| 窗口/EGL/GLES/音频/输入 | [sdl_runtime](../capability/linux/sdl_runtime/AGENTS.md) | 实际固件后端、context/present、PCM、手柄轴/HAT/热插拔；多点触控未实现 |
-| Unity | [player_lifecycle](../capability/unity/player_lifecycle/AGENTS.md)、[profiles](../AGENTS.md) | 完整 build、引擎入口、IL2CPP/GC ABI，不能以邻近版本代替证据 |
-| SDK/native plugin/游戏补丁 | [能力表](MIGRATION-MAP.md) | 先复用 FMOD/Burst/GMS 等 addon；私有类型/偏移归 gamepatch |
-| 离线资源 | [资源工具](../../tools/README.md) | GPU 格式支持与内存档分开；一次生成完整目录，默认 1 GiB |
-
-为当前任务记录需求、已有实现、具体缺口、验证结果，避免复制另一套 loader。
+Rudroid 在 ARM64 Linux 上运行 Android ARM64 Unity Player，支持 IL2CPP 和桌面 Mono 游戏先用[主机工具](../../tools/README.md#将桌面-mono-游戏制备为-arm64-运行数据)制备数据，再按[原生 ARM64 Mono 配置](UNITY-MONO.md)启用 `unity_mono`，由 `unityloader <config.toml>` 启动。
 
 ## 设备预检
 

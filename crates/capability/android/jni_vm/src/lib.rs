@@ -17,27 +17,13 @@
 //! (`android_base`) and the catalog library join the SAME session, sharing
 //! its reference semantics.
 //!
-//! Scope: [`abi::ENV_IMPLEMENTED`] lists the implemented env entries; every
-//! other slot is an explicit named failure. The pre-52 [`Resolver`]
-//! model (method key -> catalog fixed reply or caller default) stays for
-//! in-process consumers; the session layer adds the strict JNI-visible
-//! semantics on top.
-//!
-//! Catalog access: the session consults the registry through the Host API
-//! table it is created with. The `Catalog` value for the [`Resolver`] is
-//! injected by the caller (`Resolver::with_catalog`). This capability never
-//! statically links or embeds another capability (ticket 43).
-//!
-//! Miss behavior (Resolver): a miss is normal (most guest JNI calls are
-//! served by registered stubs elsewhere); when configured, the resolver
-//! emits one `STUB-MISS` log line per miss so bring-up gaps stay visible.
-//! This crate only logs; it never edits the C++ libjnivm.
+//! Guest calls consult the registered reply catalog through the shared Host API.
 
 pub mod abi;
 pub mod session;
 mod integers;
 
-use rudroid_reply_catalog_format::{Catalog, ReplyValue};
+
 
 rudroid_common::declare_descriptor!("android_jni_vm", rudroid_common::Kind::Runtime);
 
@@ -82,89 +68,6 @@ extern "C" fn rudroid_plugin_early_init(
          registered (ticket 52 minimal JNI session)",
     );
     0
-}
-
-/// A guest JNI method identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MethodKey {
-    /// JVM internal name, e.g. `android/media/AudioManager`.
-    pub class: String,
-    pub method: String,
-    /// JNI descriptor, e.g. `()Z`.
-    pub sig: String,
-}
-
-impl MethodKey {
-    pub fn new(class: &str, method: &str, sig: &str) -> MethodKey {
-        MethodKey {
-            class: class.to_owned(),
-            method: method.to_owned(),
-            sig: sig.to_owned(),
-        }
-    }
-}
-
-/// Fixed-reply resolution over the Reply Catalog.
-pub struct Resolver {
-    catalog: Catalog,
-    /// Called with the missing key on every catalog miss when installed.
-    pub on_miss: Option<Box<dyn Fn(&MethodKey) + Send + Sync>>,
-}
-
-impl Resolver {
-    /// Resolver over a caller-supplied catalog (decoded from a blob, loaded
-    /// from a path, or obtained across the dynamic catalog C API).
-    pub fn with_catalog(catalog: Catalog) -> Resolver {
-        Resolver {
-            catalog,
-            on_miss: None,
-        }
-    }
-
-    fn record_miss(&self, key: &MethodKey) {
-        if let Some(on_miss) = &self.on_miss {
-            on_miss(key);
-        }
-    }
-
-    /// Exact catalog hit, `None` on miss (caller decides the default).
-    pub fn hit(&self, key: &MethodKey) -> Option<&ReplyValue> {
-        self.catalog.query(&key.class, &key.method, &key.sig)
-    }
-
-    pub fn resolve_bool(&self, key: &MethodKey, default: bool) -> bool {
-        match self.hit(key) {
-            Some(ReplyValue::Bool(value)) => *value,
-            _ => {
-                self.record_miss(key);
-                default
-            }
-        }
-    }
-
-    pub fn resolve_int(&self, key: &MethodKey, default: i64) -> i64 {
-        match self.hit(key) {
-            Some(ReplyValue::Int(value)) => *value,
-            _ => {
-                self.record_miss(key);
-                default
-            }
-        }
-    }
-
-    pub fn resolve_str(&self, key: &MethodKey, default: &str) -> String {
-        match self.hit(key) {
-            Some(ReplyValue::Str(value)) => value.clone(),
-            _ => {
-                self.record_miss(key);
-                default.to_owned()
-            }
-        }
-    }
-
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
-    }
 }
 
 #[cfg(test)]

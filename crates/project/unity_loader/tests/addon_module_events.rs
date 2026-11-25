@@ -28,6 +28,9 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
 use rudroid_test_support::cargo::{
     build_fixture, build_loader_fixture, compile_c_fixture, ensure_workspace_cdylib,
 };
@@ -166,7 +169,11 @@ fn guest_plan(game_files: &Path) -> guest::GuestPlan {
         game_files.display()
     ))
     .unwrap();
-    guest::GuestPlan::from_config(&config).expect("plan")
+    let mut plan = guest::GuestPlan::from_config(&config).expect("plan");
+    if plan.entries.is_empty() {
+        unity_guest_plan::push_unity_arm64_entries(&mut plan);
+    }
+    plan
 }
 
 /// The Host Config the plugin getters observe (the CLI installs one before
@@ -510,7 +517,7 @@ fn corrupt_guest_library_fails_bring_up_explicitly() {
 }
 
 /// A probe that loads but exports no SetOutput: the addon must log the
-/// oracle WARNING and never claim a hook (missing-symbol explicit failure).
+/// operational error and never claim a hook (missing-symbol explicit failure).
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[test]
 fn missing_set_output_symbol_fails_the_hook_explicitly() {
@@ -533,7 +540,7 @@ fn missing_set_output_symbol_fails_the_hook_explicitly() {
         .expect("fmod event fires (the file loads)");
     assert_eq!(fmod_event.jni_on_load, Some(JNI_VERSION_1_6));
     let lines = log_slice(marker);
-    assert!(log_contains(&lines, "[FMOD] WARNING: no SetOutput hook installed"));
+    assert!(log_contains(&lines, "[ERROR] [FMOD] no SetOutput hook installed"), "{lines:?}");
     assert!(!log_contains(&lines, "[FMOD] hooked"));
 }
 

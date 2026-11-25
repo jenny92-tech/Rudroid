@@ -192,6 +192,17 @@ pub struct InstalledDetour {
     pub saved_word: u32,
 }
 
+/// A four-word redirect installed while the complete entry is idle. Its saved
+/// words are kept separate from the single-word [`InstalledDetour`] so rollback
+/// cannot silently restore only the first instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledQuiescentDetour {
+    pub target: usize,
+    pub destination: usize,
+    pub trampoline: usize,
+    saved_words: [u32; 4],
+}
+
 /// The callable original of a detoured function (its trampoline), typed
 /// once as `F` — the hooked function's `unsafe extern "C" fn` type — so hook
 /// bodies call `ORIGINAL.get()` instead of transmuting addresses. Zero means
@@ -242,8 +253,8 @@ impl<F: HookFn> Original<F> {
         self.address.store(trampoline, std::sync::atomic::Ordering::Release);
     }
 
-    /// Install a replacement of the slot's exact function type, then publish
-    /// its original. On failure the slot is unchanged.
+    /// Publish the original trampoline before redirecting this slot's entry.
+    /// If the patch fails, restore the previous slot value.
     ///
     /// # Safety
     /// As [`install`]: `target` is a live, process-owned entry of type `F`.
@@ -261,9 +272,7 @@ impl<F: HookFn> Original<F> {
         // SAFETY: caller supplies the mapped entry, matching guest ABI
         // and publication window; replacement's type matches this slot.
         unsafe {
-            let installed = install(target, replacement.address())?;
-            self.set(installed.trampoline);
-            Ok(installed)
+            install_publishing(target, replacement.address(), Some(&self.address))
         }
     }
 
@@ -280,6 +289,22 @@ impl<F: HookFn> Original<F> {
             let trampoline = install_quiescent(target, replacement.address())?;
             self.set(trampoline);
             Ok(trampoline)
+        }
+    }
+
+    /// Install and retain the complete four-word rollback record, then publish
+    /// the typed original. On failure the slot is unchanged.
+    ///
+    /// # Safety
+    /// Same complete-entry quiescence, pinned mappings and exact ABI contract
+    /// as [`Self::install_quiescent`].
+    pub unsafe fn install_quiescent_tracked(&self, target: usize, replacement: F) -> Result<InstalledQuiescentDetour, DetourError> {
+        // SAFETY: caller supplies the exact ABI and idle owned entry throughout
+        // both the complete patch and typed-original publication.
+        unsafe {
+            let installed = install_quiescent_tracked(target, replacement.address())?;
+            self.set(installed.trampoline);
+            Ok(installed)
         }
     }
 
@@ -309,242 +334,13 @@ impl<F: HookFn> Default for Original<F> {
 // ---------------------------------------------------------------------------
 // Instruction encoding/decoding (pure functions, unit-testable off-target).
 
-fn is_b(insn: u32) -> bool {
-    insn & 0xFC00_0000 == 0x1400_0000
-}
-
-fn is_bl(insn: u32) -> bool {
-    insn & 0xFC00_0000 == 0x9400_0000
-}
-
-fn is_adr(insn: u32) -> bool {
-    insn & 0x9F00_0000 == 0x1000_0000
-}
-
-fn is_adrp(insn: u32) -> bool {
-    insn & 0x9F00_0000 == 0x9000_0000
-}
-
-/// PC-relative instruction families that reference their own address (oracle
-/// `bd_is_pcrel`).
-fn is_pcrel(insn: u32) -> bool {
-    is_b(insn)
-        || is_bl(insn)
-        || is_adr(insn)
-        || is_adrp(insn)
-        || insn & 0xFF00_0010 == 0x5400_0000 // B.cond
-        || insn & 0x7E00_0000 == 0x3400_0000 // CBZ/CBNZ
-        || insn & 0x7E00_0000 == 0x3600_0000 // TBZ/TBNZ
-        || insn & 0x3B00_0000 == 0x1800_0000 // LDR/LDRSW/PRFM (literal)
-}
-
-/// Absolute result of an `ADR`/`ADRP` executed at `pc` (oracle
-/// `bd_adr_target`): the 21-bit signed immediate `immhi:immlo` is a byte
-/// offset for `ADR` and a 4 KiB page offset from `pc`'s page for `ADRP`.
-pub fn decode_adr(insn: u32, pc: usize) -> usize {
-    let immlo = (insn >> 29) & 0x3;
-    let immhi = (insn >> 5) & 0x7_FFFF;
-    let imm = ((((immhi << 2) | immlo) << 11) as i32 >> 11) as i64; // sign-extend 21 bits
-    if is_adrp(insn) {
-        ((pc as i64 & !0xFFF) + (imm << 12)) as usize
-    } else {
-        (pc as i64 + imm) as usize
-    }
-}
-
-/// The resume scratch register (`ldr x17, [pc+8]; br x17`).
-const SCRATCH: u32 = 17;
-
-/// Conservative "this word may write x17": the `Rd`/`Rt` field (bits 4:0)
-/// names x17, or a load/store pair's `Rt2` (bits 14:10) does.
-fn writes_scratch(insn: u32) -> bool {
-    let load_store_pair = insn & 0x3A00_0000 == 0x2800_0000;
-    insn & 0x1F == SCRATCH || (load_store_pair && (insn >> 10) & 0x1F == SCRATCH)
-}
-
-/// `ldr x<rt>, [pc+8]` (64-bit literal load, imm19 = 2 words).
-fn ldr_literal_p8(rt: u32) -> u32 {
-    0x5800_0040 | (rt & 0x1F)
-}
-
-/// `b +12`: skips a two-word literal that sits behind the branch.
-const B_PLUS_12: u32 = 0x1400_0003;
-
-/// `delta` fits the B/BL immediate field (±2^25 words = ±128 MiB).
-pub fn in_branch_range(pc: usize, target: usize) -> bool {
-    let delta = target as i64 - pc as i64;
-    delta >= -BRANCH_RANGE_BYTES && delta <= BRANCH_RANGE_BYTES - 4
-}
-
-/// Encode a direct `B`; `None` when the target is out of the immediate range
-/// or misaligned.
-pub fn encode_b(pc: usize, target: usize) -> Option<u32> {
-    let delta = target as i64 - pc as i64;
-    if delta % 4 != 0 || !in_branch_range(pc, target) {
-        return None;
-    }
-    Some(0x1400_0000 | ((delta as u32) >> 2 & 0x03FF_FFFF))
-}
-
-/// Encode a direct `BL` (same immediate range as `B`). The redirect itself
-/// always uses `B` (the replacement owns the return register), so this stays
-/// unit-test-only until a relocator needs it.
-#[allow(dead_code)]
-pub fn encode_bl(pc: usize, target: usize) -> Option<u32> {
-    let delta = target as i64 - pc as i64;
-    if delta % 4 != 0 || !in_branch_range(pc, target) {
-        return None;
-    }
-    Some(0x9400_0000 | ((delta as u32) >> 2 & 0x03FF_FFFF))
-}
-
-/// Decode a `B` back to its absolute target.
-pub fn decode_b(insn: u32, pc: usize) -> usize {
-    let imm26 = (insn & 0x03FF_FFFF) as i32;
-    let imm = (imm26 << 6) >> 6; // sign-extend 26 bits
-    (pc as i64 + imm as i64 * 4) as usize
-}
-
-/// The absolute veneer: `ldr x17, [pc+8]; br x17; .quad destination`.
-/// Four words, self-contained (the literal follows the two instructions),
-/// no range limit on `destination`.
-pub fn absolute_jump(destination: usize) -> [u32; 4] {
-    [
-        LDR_X17_P8,
-        BR_X17,
-        destination as u32,
-        (destination >> 32) as u32,
-    ]
-}
-
-/// How the covered entry word moves into the trampoline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Relocated {
-    /// Not PC-relative: executes identically from the trampoline, and the
-    /// original function resumes at `target + 4`.
-    Verbatim(u32),
-    /// Unconditional `B`: control leaves the entry here — the trampoline
-    /// jumps to the decoded absolute target; the words behind it are dead
-    /// and there is no resume.
-    TailBranch(usize),
-    /// `ADR`/`ADRP`: the trampoline loads the absolute address the original
-    /// would have computed into the same `Xd`, then resumes at `target + 4`.
-    Materialize { rd: u32, value: usize },
-}
-
-/// Classify the covered entry word. PC-relative words other than `B`,
-/// `ADR` and `ADRP` refuse the install (documented support set).
-pub fn classify(insn: u32, pc: usize) -> Result<Relocated, DetourError> {
-    if is_b(insn) {
-        return Ok(Relocated::TailBranch(decode_b(insn, pc)));
-    }
-    // Every remaining shape is followed by the x17 resume jump.
-    if !is_pcrel(insn) || is_adr(insn) || is_adrp(insn) {
-        if writes_scratch(insn) {
-            return Err(DetourError::ScratchRegisterConflict {
-                instruction: insn,
-                pc_offset: pc,
-            });
-        }
-    }
-    if is_adr(insn) || is_adrp(insn) {
-        return Ok(Relocated::Materialize {
-            rd: insn & 0x1F,
-            value: decode_adr(insn, pc),
-        });
-    }
-    if is_pcrel(insn) {
-        return Err(DetourError::UnsupportedPrologue {
-            instruction: insn,
-            pc_offset: pc,
-        });
-    }
-    Ok(Relocated::Verbatim(insn))
-}
-
-/// Build the trampoline replay for one covered entry word: a verbatim copy
-/// (or, for `ADR`/`ADRP`, a position-independent literal load of the
-/// computed address) followed by the resume jump to `target + 4`, or — for a
-/// tail branch — the absolute jump to its decoded target with NO resume
-/// (dead tail).
-pub fn relocate_entry(insn: u32, target: usize) -> Result<Vec<u32>, DetourError> {
-    let mut body = match classify(insn, target)? {
-        Relocated::Verbatim(word) => vec![word],
-        Relocated::Materialize { rd, value } => vec![
-            ldr_literal_p8(rd),
-            B_PLUS_12,
-            value as u32,
-            (value as u64 >> 32) as u32,
-        ],
-        Relocated::TailBranch(tail_target) => {
-            return Ok(absolute_jump(tail_target).to_vec());
-        }
-    };
-    body.extend_from_slice(&absolute_jump(target + 4));
-    Ok(body)
-}
-
-/// Replay a quiescent four-word entry without returning into overwritten
-/// instructions. Every PC-relative word is classified before installation.
-fn relocate_quiescent_entry(words: &[u32; 4], target: usize) -> Result<Vec<u32>, DetourError> {
-    let mut body = Vec::new();
-    for (index, word) in words.iter().enumerate() {
-        if let Some((inverted,destination))=conditional_redirect(*word,target+index*4){
-            if (target..target+16).contains(&destination){
-                return Err(DetourError::UnsupportedPrologue{instruction:*word,pc_offset:target+index*4});
-            }
-            // Invert the original predicate and skip a four-word absolute jump.
-            // LDR/BR preserve flags; integer/test bit/register widths are unchanged.
-            body.push(inverted);body.extend_from_slice(&absolute_jump(destination));continue;
-        }
-        match classify(*word, target + index * 4)? {
-            Relocated::Verbatim(word) => body.push(word),
-            Relocated::Materialize { rd, value } => body.extend_from_slice(&[
-                ldr_literal_p8(rd),
-                B_PLUS_12,
-                value as u32,
-                (value as u64 >> 32) as u32,
-            ]),
-            Relocated::TailBranch(tail) => {
-                if (target..target + 16).contains(&tail) {
-                    return Err(DetourError::UnsupportedPrologue {
-                        instruction: *word,
-                        pc_offset: target + index * 4,
-                    });
-                }
-                body.extend_from_slice(&absolute_jump(tail));
-                return Ok(body);
-            }
-        }
-    }
-    body.extend_from_slice(&absolute_jump(target + 16));
-    Ok(body)
-}
-
-/// Relocate only conditional branches to external code; internal targets are rejected above.
-fn conditional_redirect(word:u32,pc:usize)->Option<(u32,usize)>{
-    let (mask,bits,invert)=if word&0xff00_0010==0x5400_0000 && word&0xf<14 {
-        (0x00ff_ffe0u32,19u32,1u32)
-    }else if word&0x7e00_0000==0x3400_0000 {
-        (0x00ff_ffe0,19,1<<24)
-    }else if word&0x7e00_0000==0x3600_0000 {
-        (0x0007_ffe0,14,1<<24)
-    }else{return None;};
-    let immediate=(word&mask)>>5;
-    let signed=((immediate as i32)<<(32-bits))>>(32-bits);
-    let destination=(pc as i64+signed as i64*4)as usize;
-    let inverted=((word^invert)&!mask)|(5<<5);
-    Some((inverted,destination))
-}
-
-/// Choose the redirect shape for a (target, destination) pair.
-pub fn plan_redirect(target: usize, destination: usize) -> HookShape {
-    if in_branch_range(target, destination) {
-        HookShape::Branch
-    } else {
-        HookShape::AbsoluteJump
-    }
-}
+#[path = "arm64_instructions.rs"]
+mod instructions;
+pub use instructions::{decode_adr, in_branch_range, encode_b, encode_bl, decode_b, absolute_jump, Relocated, classify, relocate_entry, plan_redirect};
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+use instructions::relocate_quiescent_entry;
+#[cfg(test)]
+use instructions::{is_adrp, ldr_literal_p8, conditional_redirect, B_PLUS_12};
 
 // ---------------------------------------------------------------------------
 // Page plumbing (the install surface only exists on the production target:
@@ -842,14 +638,9 @@ fn pool_write_near(target: usize, body: &[u32]) -> Result<usize, DetourError> {
     let base = align_down(target, HUGE_PAGE);
     let fixed = ARENA_HINT_DELTAS.into_iter().filter_map(|delta| base.checked_add_signed(delta as isize));
     let mapped = std::iter::once_with(|| {
-        use std::io::Read;
-        const LIMIT: usize = 4 * 1024 * 1024;
-        let Ok(file) = std::fs::File::open("/proc/self/maps") else { return Vec::new(); };
-        let mut snapshot = String::new();
-        if file.take((LIMIT + 1) as u64).read_to_string(&mut snapshot).is_err() || snapshot.len() > LIMIT {
-            return Vec::new();
-        }
-        near_gap_hints(target, page_size, &snapshot).unwrap_or_default()
+        MappedRegions::snapshot().ok()
+            .and_then(|regions| near_gap_hints(target, page_size, regions.as_str()))
+            .unwrap_or_default()
     }).flatten();
     for hint in fixed.chain(mapped) {
         if hint == 0 {
@@ -919,7 +710,6 @@ pub unsafe fn patch_words_if_matches(
     replacement: &[u32],
     guards: &[CodeGuard<'_>],
 ) -> Result<bool, DetourError> {
-    use std::io::Read;
     if expected.len() != replacement.len() || expected.is_empty() || expected.len() > 4
         || guards.len() > 8
     {
@@ -937,17 +727,10 @@ pub unsafe fn patch_words_if_matches(
             return Err(DetourError::Protection("invalid image guard range".into()));
         }
     }
-    const LIMIT: usize = 4 * 1024 * 1024;
-    let file = std::fs::File::open("/proc/self/maps")
+    let snapshot = MappedRegions::snapshot()
         .map_err(|error| DetourError::Protection(error.to_string()))?;
-    let mut snapshot = String::new();
-    file.take((LIMIT + 1) as u64).read_to_string(&mut snapshot)
-        .map_err(|error| DetourError::Protection(error.to_string()))?;
-    if snapshot.len() > LIMIT {
-        return Err(DetourError::Protection("mapping snapshot exceeds limit".into()));
-    }
     for (index, guard) in ranges.clone().enumerate() {
-        if !readable_image_range(&snapshot, guard.address, guard.words.len() * 4, index == 0) {
+        if !snapshot.contains(guard.address, guard.words.len() * 4, index == 0) {
             return Err(DetourError::Protection("image guard is not mapped with required permissions".into()));
         }
     }
@@ -969,21 +752,8 @@ pub unsafe fn patch_words_if_matches(
     Ok(true)
 }
 
-/// A single readable VMA must contain the complete range. Conservatively
-/// refusing ranges split across VMAs avoids guessing changing permissions.
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-fn readable_image_range(snapshot: &str, address: usize, bytes: usize, executable: bool) -> bool {
-    let Some(limit) = address.checked_add(bytes) else { return false; };
-    if bytes == 0 { return false; }
-    snapshot.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        let Some((start, end)) = fields.next().and_then(|range| range.split_once('-')) else { return false; };
-        let Some(permissions) = fields.next() else { return false; };
-        let (Ok(start), Ok(end)) = (usize::from_str_radix(start, 16), usize::from_str_radix(end, 16)) else { return false; };
-        start <= address && limit <= end && permissions.as_bytes().first() == Some(&b'r')
-            && (!executable || permissions.as_bytes().get(2) == Some(&b'x'))
-    })
-}
+use crate::mapped_memory::MappedRegions;
 
 /// A failed seal must leave the old instruction callable: callers publish
 /// their original trampoline only after this operation succeeds.
@@ -1013,6 +783,20 @@ unsafe fn patch_words_with(
         return Err(DetourError::Protection(
             "patch must fit in one code page".into(),
         ));
+    }
+    // Each capability statically links common. Independently opened handles
+    // to this process's procfs inode serialize writers across all those DSOs.
+    // Closing the file (also on error) releases the kernel lock.
+    use std::os::fd::AsRawFd;
+    let lock = std::fs::File::open("/proc/self")
+        .map_err(|error| DetourError::Protection(error.to_string()))?;
+    loop {
+        // SAFETY: the File owns a valid fd for the duration of this call.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 { break; }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(DetourError::Protection(error.to_string()));
+        }
     }
     // SAFETY: caller contract — owned code page; execute stays on.
     unsafe {
@@ -1049,6 +833,18 @@ unsafe fn patch_words_with(
 /// remain callable for process life. Interior entry points are unsupported.
 #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 pub unsafe fn install_quiescent(target: usize, destination: usize) -> Result<usize, DetourError> {
+    // SAFETY: the caller supplies the same complete-entry ownership/idle contract.
+    unsafe { install_quiescent_tracked(target, destination) }.map(|record| record.trampoline)
+}
+
+/// Install the same redirect as [`install_quiescent`], retaining all four words
+/// for a checked, complete rollback with [`restore_quiescent`].
+///
+/// # Safety
+/// Same contract as [`install_quiescent`]; all covered instructions stay idle
+/// until installation and original-address publication have completed.
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+pub unsafe fn install_quiescent_tracked(target: usize, destination: usize) -> Result<InstalledQuiescentDetour, DetourError> {
     if target % 4 != 0 {
         return Err(DetourError::Unaligned(target));
     }
@@ -1086,7 +882,24 @@ pub unsafe fn install_quiescent(target: usize, destination: usize) -> Result<usi
         .expect("trampoline pool lock")
         .pages
         .push(page);
-    Ok(original)
+    Ok(InstalledQuiescentDetour { target, destination, trampoline: original, saved_words: saved })
+}
+
+/// Restore all 16 entry bytes only while the current redirect still exactly
+/// matches this record. A stale/wrong record leaves the entry untouched. The
+/// process-pinned trampoline remains callable after restoration.
+///
+/// # Safety
+/// The record's owned image stays pinned and no thread executes any of the
+/// covered instructions throughout comparison and restoration. No concurrent
+/// writer may change the entry or its mappings.
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+pub unsafe fn restore_quiescent(detour: &InstalledQuiescentDetour) -> Result<(), DetourError> {
+    // SAFETY: caller pins the image and keeps all four words idle and stable;
+    // checked patching validates mapping, current redirect and full rollback.
+    let restored = unsafe { patch_words_if_matches(detour.target, &absolute_jump(detour.destination), &detour.saved_words, &[]) }?;
+    if !restored { return Err(DetourError::Protection("quiescent detour entry no longer matches its record".into())); }
+    Ok(())
 }
 
 /// Install an inline detour: patch `target` so calls reach `destination`,
@@ -1102,8 +915,14 @@ pub unsafe fn install_quiescent(target: usize, destination: usize) -> Result<usi
 ///
 /// # Safety
 /// See the contract above; violations crash the process like any patcher.
-#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 pub unsafe fn install(target: usize, destination: usize) -> Result<InstalledDetour, DetourError> {
+    // SAFETY: caller provides the live entry and valid destination described above.
+    unsafe { install_publishing(target, destination, None) }
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
+unsafe fn install_publishing(target: usize, destination: usize,
+    slot: Option<&std::sync::atomic::AtomicUsize>) -> Result<InstalledDetour, DetourError> {
     if target % 4 != 0 {
         return Err(DetourError::Unaligned(target));
     }
@@ -1147,7 +966,14 @@ pub unsafe fn install(target: usize, destination: usize) -> Result<InstalledDeto
     // The trampoline is complete and flushed before this store makes it
     // reachable.
     // SAFETY: caller contract — owned code pages.
-    unsafe { patch_word(target, redirect)? };
+    let previous = slot.map(|address| address.swap(trampoline, std::sync::atomic::Ordering::AcqRel));
+    // SAFETY: the caller pins this entry for the complete patch and any rollback.
+    if let Err(error) = unsafe { patch_word(target, redirect) } {
+        if let (Some(address), Some(previous)) = (slot, previous) {
+            address.store(previous, std::sync::atomic::Ordering::Release);
+        }
+        return Err(error);
+    }
 
     Ok(InstalledDetour {
         target,
@@ -1183,7 +1009,8 @@ pub unsafe fn restore(detour: &InstalledDetour) -> Result<(), DetourError> {
 /// # Safety
 /// Same contract as the Linux AArch64 implementation.
 #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
-pub unsafe fn install(_target: usize, _destination: usize) -> Result<InstalledDetour, DetourError> {
+unsafe fn install_publishing(_target: usize, _destination: usize,
+    _slot: Option<&std::sync::atomic::AtomicUsize>) -> Result<InstalledDetour, DetourError> {
     Err(DetourError::UnsupportedTarget)
 }
 
@@ -1193,6 +1020,15 @@ pub unsafe fn install(_target: usize, _destination: usize) -> Result<InstalledDe
 /// Same contract as the Linux AArch64 implementation.
 #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
 pub unsafe fn install_quiescent(_target: usize, _destination: usize) -> Result<usize, DetourError> {
+    Err(DetourError::UnsupportedTarget)
+}
+
+/// Unsupported hosts refuse installation before inspecting the target.
+///
+/// # Safety
+/// Same contract as the Linux AArch64 implementation.
+#[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
+pub unsafe fn install_quiescent_tracked(_target: usize, _destination: usize) -> Result<InstalledQuiescentDetour, DetourError> {
     Err(DetourError::UnsupportedTarget)
 }
 

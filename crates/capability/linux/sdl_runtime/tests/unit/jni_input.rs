@@ -2,6 +2,34 @@
 //! OUTPUT:  `tests` unit tests, compiled into the crate only under cfg(test)
 //! POS:    keeps test bodies out of `src/jni_input.rs`; declared there with `#[path]`
 use super::*;
+
+#[test]
+fn touch_diagnostics_are_quiet_unless_enabled_and_ignore_other_events() {
+    let mut quiet = TouchTrace::default();
+    quiet.empty_poll();
+    assert_eq!(quiet.take(true), None);
+    assert_eq!((quiet.emitted, quiet.batch), (0, 0));
+    let mut trace = TouchTrace { enabled: true, ..TouchTrace::default() };
+    for _ in 0..100 { assert_eq!(trace.take(false), None); }
+    assert_eq!(trace.emitted, 0, "keys, scripts, mouse and finger motion cannot consume or output samples");
+    assert_eq!(trace.take(true), Some(0));
+    assert_eq!(trace.take(true), Some(0), "two touches before a null poll share its drain label");
+    trace.empty_poll();
+    assert_eq!(trace.take(true), None);
+    assert_eq!(trace.emitted, 2, "the per-session budget is never reset by empty polls");
+}
+
+#[test]
+fn touch_diagnostic_batch_changes_on_null_and_a_new_session_resets_it() {
+    let mut trace = TouchTrace { enabled: true, ..TouchTrace::default() };
+    assert_eq!(trace.take(true), Some(0));
+    trace.empty_poll();
+    assert_eq!(trace.take(true), Some(1));
+    let mut next_session = TouchTrace { enabled: true, ..TouchTrace::default() };
+    assert_eq!(next_session.take(true), Some(0));
+    assert_eq!(next_session.emitted, 1);
+}
+
 #[test]
 fn held_keys_repeats_and_touch_keep_independent_down_times() {
     let mut times = InputTimes {

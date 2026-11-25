@@ -549,6 +549,190 @@ fn boolean_int_native_preserves_signed_width_and_rejects_invalid_calls() {
 }
 
 #[test]
+fn boolean_object_int_native_forwards_input_event_and_zero_mode() {
+    extern "C" fn inject(_env: *mut c_void, receiver: *mut c_void,
+        event: *mut c_void, mode: i32) -> u8 {
+        u8::from(!receiver.is_null() && !event.is_null() && mode == 0)
+    }
+    let _serial = test_support::SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    init_with_host(test_support::stub_host());
+    let s = session().unwrap(); s.take_pending();
+    let env = abi::env_ptr();
+    let class = s.find_class("test/BooleanObjectIntDispatch").unwrap();
+    let event_class = s.find_class("android/view/InputEvent").unwrap();
+    let receiver = s.alloc_object(class);
+    let event = s.alloc_object(event_class);
+    let binding = JniNativeMethod {
+        name: c"inject".as_ptr(),
+        signature: c"(Landroid/view/InputEvent;I)Z".as_ptr(),
+        fn_ptr: inject as *mut c_void,
+    };
+    // SAFETY: live class and exact (JNIEnv*, jobject, jobject, jint) -> jboolean ABI.
+    assert_eq!(unsafe { s.register_natives(class, &binding, 1) }, abi::JNI_OK);
+    assert_eq!(s.registered_native("test/BooleanObjectIntDispatch", "inject", "(Landroid/view/InputEvent;I)Z"), Some(inject as usize));
+    let method = s.resolve_method(class, "inject", "(Landroid/view/InputEvent;I)Z", "test").unwrap();
+    let args = [JValue { l: event }, JValue { i: 0 }];
+    // SAFETY: live receiver/class, matching method and one reference plus one jint argument.
+    unsafe {
+        assert_eq!(shims::call_boolean_method_a(env, receiver, method, args.as_ptr()), abi::JNI_TRUE);
+    }
+    assert!(s.take_pending().is_none());
+    let nonzero = [JValue { l: event }, JValue { i: 1 }];
+    // SAFETY: as above; the native exercises the exact signed jint slot.
+    unsafe {
+        assert_eq!(shims::call_boolean_method_a(env, receiver, method, nonzero.as_ptr()), abi::JNI_FALSE);
+        assert_eq!(shims::call_boolean_method_a(env, receiver, method, std::ptr::null()), abi::JNI_FALSE);
+    }
+    assert!(s.take_pending().is_some());
+    assert_eq!(s.unregister_natives(class), abi::JNI_OK);
+    assert_eq!(s.registered_native("test/BooleanObjectIntDispatch", "inject", "(Landroid/view/InputEvent;I)Z"), None);
+    for handle in [event, receiver, event_class, class] { s.delete_ref(handle, false, "test"); }
+}
+
+#[test]
+fn five_object_int_native_preserves_receiver_order_values_and_exception() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static EXPECTED: std::sync::Mutex<[usize; 6]> = std::sync::Mutex::new([0; 6]);
+    const RESULT: i32 = 0x5a17_c0de;
+
+    unsafe extern "C" fn initialize(env: *mut c_void, receiver: *mut c_void,
+        a: *mut c_void, b: *mut c_void, c: *mut c_void, d: *mut c_void,
+        values: *mut c_void) -> i32 {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        let actual = [receiver, a, b, c, d, values];
+        let expected = *EXPECTED.lock().unwrap_or_else(|p| p.into_inner());
+        let ordered = actual.iter().zip(expected).all(|(actual, expected)| {
+            shims::is_same_object(env, *actual, expected as *mut c_void) != 0
+        });
+        let distinct = (0..actual.len()).all(|i| (i + 1..actual.len()).all(|j| {
+            shims::is_same_object(env, actual[i], actual[j]) == 0
+        }));
+        if ordered && distinct { RESULT } else { -1 }
+    }
+    unsafe extern "C" fn throwing(env: *mut c_void, _receiver: *mut c_void,
+        _a: *mut c_void, _b: *mut c_void, _c: *mut c_void, _d: *mut c_void,
+        _values: *mut c_void) -> i32 {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        let throwable = shims::find_class(env, c"java/lang/Throwable".as_ptr());
+        let _ = shims::throw_new(env, throwable, c"AnoApplication.initialize failed".as_ptr());
+        -613
+    }
+
+    let _serial = test_support::SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    init_with_host(test_support::stub_host());
+    let s = session().unwrap(); s.take_pending();
+    let env = abi::env_ptr();
+    let class = s.find_class("com/ano/gshell/AnoApplication").unwrap();
+    let string_class = s.find_class("java/lang/String").unwrap();
+    let concrete = s.find_class("org/rudroid/fixture/InheritedApplication").unwrap();
+    s.set_superclass(concrete, class);
+    assert!(s.take_pending().is_none());
+    let receiver = s.alloc_object(concrete);
+    let first = s.new_string(b"first");
+    let second = s.new_string(b"second");
+    let third = s.new_string(b"third");
+    let fourth = s.new_string(b"fourth");
+    let values = s.new_object_array(0, string_class, std::ptr::null_mut());
+    assert!(!values.is_null());
+    *EXPECTED.lock().unwrap_or_else(|p| p.into_inner()) =
+        [receiver, first, second, third, fourth, values].map(|handle| handle as usize);
+
+    let methods = [
+        JniNativeMethod {
+            name: c"initialize".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)I".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"initializeThrowing".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)I".as_ptr(),
+            fn_ptr: throwing as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"nearObjectTail".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)I".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"nearObjectArray".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)I".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"nearStringTail".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"nearLongReturn".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)J".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+        JniNativeMethod {
+            name: c"nearShortArity".as_ptr(),
+            signature: c"(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I".as_ptr(),
+            fn_ptr: initialize as *mut c_void,
+        },
+    ];
+    // SAFETY: live class; every callback uses the descriptor-matched prototype.
+    unsafe { assert_eq!(s.register_natives(class, methods.as_ptr(), methods.len() as i32), abi::JNI_OK); }
+    let arguments = [
+        JValue { l: first }, JValue { l: second }, JValue { l: third },
+        JValue { l: fourth }, JValue { l: values },
+    ];
+    let initialize = s.resolve_method(class, "initialize",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)I",
+        "test").unwrap();
+    // SAFETY: live receiver and five exact reference jvalues; the native fixture
+    // verifies Java identity instead of promoted local-handle token equality.
+    assert_eq!(unsafe {
+        shims::call_int_method_a(env, receiver, initialize, arguments.as_ptr())
+    }, RESULT);
+    assert!(s.take_pending().is_none());
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    // SAFETY: the exact shape still requires a readable five-jvalue array.
+    assert_eq!(unsafe {
+        shims::call_int_method_a(env, receiver, initialize, std::ptr::null())
+    }, 0);
+    assert_eq!(s.take_pending().expect("missing jvalues").class, "java/lang/IllegalArgumentException");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+
+    let throwing = s.resolve_method(class, "initializeThrowing",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)I",
+        "test").unwrap();
+    // SAFETY: as above; the native throws through the real JNI table and
+    // returns a non-zero jint that must survive the automatic native frame.
+    assert_eq!(unsafe {
+        shims::call_int_method_a(env, receiver, throwing, arguments.as_ptr())
+    }, -613);
+    let pending = s.take_pending().expect("native exception must remain pending");
+    assert_eq!(pending.class, "java/lang/Throwable");
+    assert_eq!(pending.message, "AnoApplication.initialize failed");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+
+    for (name, signature) in [
+        ("nearObjectTail", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;)I"),
+        ("nearObjectArray", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)I"),
+        ("nearStringTail", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I"),
+        ("nearLongReturn", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;)J"),
+        ("nearShortArity", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I"),
+    ] {
+        let method = s.resolve_method(class, name, signature, "test").unwrap();
+        // SAFETY: registered near-miss descriptors must reach no native body.
+        assert_eq!(unsafe {
+            shims::call_int_method_a(env, receiver, method, arguments.as_ptr())
+        }, 0, "{name}");
+        assert_eq!(s.take_pending().expect(name).class, "java/lang/UnsatisfiedLinkError", "{name}");
+    }
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "near-miss descriptors must not dispatch");
+    *EXPECTED.lock().unwrap_or_else(|p| p.into_inner()) = [0; 6];
+    for handle in [first, second, third, fourth, values, receiver, string_class, concrete, class] {
+        s.delete_ref(handle, false, "test");
+    }
+}
+
+#[test]
 fn void_float_native_preserves_bits_and_rejects_invalid_calls() {
     use std::sync::atomic::{AtomicU32,AtomicUsize,Ordering};
     static BITS:AtomicU32=AtomicU32::new(0);
@@ -903,14 +1087,16 @@ fn two_integer_native_calls_keep_both_values_and_revoke_cached_method_ids() {
 }
 
 #[test]
-fn mixed_reference_primitive_reference_native_is_never_called_with_two_reference_prototype() {
+fn mixed_reference_long_reference_native_is_never_called_with_two_reference_prototype() {
     let _serial = test_support::SERIAL.lock().unwrap_or_else(|p|p.into_inner());
     init_with_host(test_support::stub_host());let s=session().unwrap();s.take_pending();
     static CALLED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
-    unsafe extern "C" fn mixed(_: *mut c_void,_:*mut c_void,_:*mut c_void,_:i32,_:*mut c_void){CALLED.store(true,std::sync::atomic::Ordering::Relaxed);}
+    unsafe extern "C" fn mixed(_: *mut c_void,_:*mut c_void,_:*mut c_void,_:i64,_:*mut c_void){CALLED.store(true,std::sync::atomic::Ordering::Relaxed);}
     let class=s.find_class("test/MixedPrototype").unwrap();let object=s.alloc_object(class);
-    let native=[JniNativeMethod{name:c"mixed".as_ptr(),signature:c"(Ljava/lang/Object;ILjava/lang/Object;)V".as_ptr(),fn_ptr:mixed as *mut c_void}];
-    unsafe {s.register_natives(class,native.as_ptr(),1);let method=s.resolve_method(class,"mixed","(Ljava/lang/Object;ILjava/lang/Object;)V","test").unwrap();shims::call_void_method_a(abi::env_ptr(),object,method,[JValue{l:object},JValue{i:17},JValue{l:object}].as_ptr());}
+    // LIL is supported for LocationListener.onStatusChanged. LJL remains
+    // unavailable and must not enter an all-reference or narrow-int prototype.
+    let native=[JniNativeMethod{name:c"mixedLong".as_ptr(),signature:c"(Ljava/lang/Object;JLjava/lang/Object;)V".as_ptr(),fn_ptr:mixed as *mut c_void}];
+    unsafe {s.register_natives(class,native.as_ptr(),1);let method=s.resolve_method(class,"mixedLong","(Ljava/lang/Object;JLjava/lang/Object;)V","test").unwrap();shims::call_void_method_a(abi::env_ptr(),object,method,[JValue{l:object},JValue{j:i64::MAX},JValue{l:object}].as_ptr());}
     assert!(!CALLED.load(std::sync::atomic::Ordering::Relaxed));assert!(s.take_pending().is_some());s.delete_ref(object,false,"test");s.delete_ref(class,false,"test");
 }
 
@@ -919,7 +1105,7 @@ fn reflected_object_hint_finds_interface_methods_and_static_fields_without_alias
     let _serial = test_support::SERIAL.lock().unwrap_or_else(|p|p.into_inner());let s=local_session();
     let interface=s.find_class("test/ReflectionInterface").unwrap();let class=s.find_class("test/ReflectionImplementation").unwrap();
     let interface_id=s.resolve_class(interface,"test").unwrap();let class_id=s.resolve_class(class,"test").unwrap();
-    s.classes.lock().unwrap().interfaces.insert(class_id,vec![interface_id]);
+    s.classes.write().unwrap().interfaces.insert(class_id,vec![interface_id]);
     unsafe extern "C" fn getter(_: *mut c_void,_:*mut c_void)->*mut c_void{std::ptr::null_mut()}
     let native=[JniNativeMethod{name:c"getValue".as_ptr(),signature:c"()Ljava/lang/String;".as_ptr(),fn_ptr:getter as *mut c_void}];
     unsafe{s.register_natives(interface,native.as_ptr(),1);}

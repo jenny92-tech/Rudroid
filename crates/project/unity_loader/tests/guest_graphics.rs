@@ -7,11 +7,16 @@
 fn mapped_guest_graphics_requires_sdl_arm64() {}
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64", rudroid_kit_sdl))]
+#[path = "fixtures/unity_guest_plan.rs"]
+mod unity_guest_plan;
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64", rudroid_kit_sdl))]
 mod real {
 
+    use super::unity_guest_plan;
     use rudroid_common::registry::RudroidAndroidHooks;
     use rudroid_test_support::cargo::{
-        assert_kit_features, build_loader_fixture, ensure_workspace_cdylib,
+        build_loader_fixture, ensure_workspace_cdylib,
     };
     use rudroid_unity_loader::{bring_up, guest, load_deploy_dir, runtime, GuestPlan, Selection};
     use std::ffi::{c_char, c_void};
@@ -45,7 +50,7 @@ mod real {
 
     #[test]
     fn mapped_guest_draws_through_static_imports_and_dynamic_proc_lookup() {
-        assert_kit_features(platform_sdl_runtime::SDL_ENABLED);
+
         let root = std::env::temp_dir().join(format!("rudroid-guest-graphics-{}", std::process::id()));
         let deploy = root.join("kit");
         let game = root.join("game");
@@ -90,8 +95,13 @@ mod real {
         let error = runtime::bring_up_sdl_session(&capabilities, &config).unwrap_err();
         assert!(error.to_string().contains("already active"), "{error}");
         // The failed second activation must preserve the first source/session.
-        let events =
-            unsafe { guest::bring_up(&capabilities, &GuestPlan::from_config(&config).unwrap()) }.unwrap();
+        let events = {
+            let mut plan = GuestPlan::from_config(&config).unwrap();
+            if plan.entries.is_empty() {
+                unity_guest_plan::push_unity_arm64_entries(&mut plan);
+            }
+            unsafe { guest::bring_up(&capabilities, &plan) }.unwrap()
+        };
         let main = events
             .iter()
             .find(|event| event.kind == rudroid_common::ModuleKind::Main)

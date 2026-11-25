@@ -61,7 +61,7 @@ fn lookup_keeps_parent_before_interface_and_exact_field_kinds() {
     let parent_id = s.resolve_class(parent, "test").unwrap();
     let interface_id = s.resolve_class(interface, "test").unwrap();
     let child_id = s.resolve_class(child, "test").unwrap();
-    s.classes.lock().unwrap().interfaces.insert(child_id, vec![interface_id]);
+    s.classes.write().unwrap().interfaces.insert(child_id, vec![interface_id]);
     let expected = s.define_field(parent_id, "value", "I", true).unwrap();
     s.define_field(interface_id, "value", "I", true).unwrap();
     assert_eq!(s.resolve_field(child, "value", "I", true), make_handle(TAG_FIELD, expected));

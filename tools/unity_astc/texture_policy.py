@@ -9,6 +9,8 @@ import re
 from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 from UnityPy.enums import TextureFormat as TF
 
+from .resource_refs import resource_basename
+
 UNITY_ASTC_BLOCKS = {(n, n) for n in (4, 5, 6, 8, 10, 12)}
 QUALITY_LIMITS = (32.0, 0.995, 3.0, 1.0)
 DESKTOP_COLOR_FORMATS = {TF.DXT1, TF.DXT5, TF.DXT1Crunched, TF.DXT5Crunched, TF.BC7}
@@ -106,7 +108,9 @@ def quality_passes(metrics, min_psnr, min_ssim, max_edge_mae, max_alpha_mae):
 
 def sensitive_name_reason(name):
     """Conservative name fallback for metadata-light sensitive textures."""
-    normalized = re.sub(r"[^a-z0-9]+", " ", name.casefold()).strip()
+    # Serialized custom fonts can use names like BitmapFontAtlas without spaces.
+    words = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    normalized = re.sub(r"[^a-z0-9]+", " ", words.casefold()).strip()
     tokens = set(normalized.split())
     compact = normalized.replace(" ", "")
     if name.endswith(" Atlas") or tokens.intersection(("font", "sdf")):
@@ -139,7 +143,7 @@ def image_passes(reference, candidate):
 def keep_reason(texture, key, fonts):
     if cpu_pixels_protected(texture):
         return "cpu-readable-or-unknown"
-    if key in fonts or sensitive_name_reason(texture.m_Name):
+    if key in fonts or (resource_basename(key[0]).lower(), key[1]) in fonts or sensitive_name_reason(texture.m_Name):
         return "font-or-data-texture"
     if (getattr(texture, "m_ImageCount", 1) != 1 or
             getattr(texture, "m_TextureDimension", 2) != 2 or

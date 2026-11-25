@@ -3,6 +3,39 @@
 本文只定义配置和所有权；效果取舍见[性能决策](PERFORMANCE-AUDIT.md)，
 设备与标题范围见[验收](ACCEPTANCE.md)。
 
+ARM64 Mono 的可信输入、`[unity.mono]` 和可选 Runtime 配置见 [Unity Mono](UNITY-MONO.md)。
+新增 EngineProfile / 非 Unity 引擎见 [ENGINE-PROFILE-CONTRACT](ENGINE-PROFILE-CONTRACT.md)。
+
+## Host API 版本与扩展槽
+
+同 kit 成员共享一份 `HostApiV0`；**`HOST_API_VERSION = 7`**。只在表尾追加字段并升版本，
+混 kit 拒绝。能力通过 `HostApiV0` 安全方法访问，不直接读编号槽位。
+
+| 槽 / 方法 | 语义 |
+|---|---|
+| `register_service` / `register_named_service` | 命名服务首登胜出；`name` 与指针进程内固定；携带 ABI 版本 |
+| `query_service` / `query_named_service` | 缺失或 ABI 不符返回 null |
+| `register_service_typed` / `query_service_typed` | `ServiceContract` 类型安全封装；业务代码零 `unsafe` 消费命名服务 |
+| `rudroid.host.config_toml.v1` / `config_toml` | Host 内置只读 `HostConfigTomlV1` 服务，供能力直接按同一 TOML 契约解析/拒未知字段 |
+| `config_array_size` / `config_len` | 纯数组长度（缺失或非数组/表均返回 `0`） |
+| `config_set_string` / `set_config_string` | 仅限 `package.mainIntentBundle.<key>` 的首写胜出运行时覆写（成功返回 `1`，其余键与重复写返回 `0`）；getter 先查覆写再查 HostConfig |
+| `register_file_overlay` | 精确规范路径首登胜出；canonical → replacement（host 复制字符串） |
+
+已有消费者示例：`unity_mono` 发布 `rudroid.unity.mono.v1`（validate / reserved
+paths / start_bridge）；`android_elf_load` 发布 `rudroid.elf.guest_libdl.v1`；
+Unity `BootView` 经 `register_file_overlay` 替换 sealed boot.config，并可经
+`set_config_string("package.mainIntentBundle.unity", …)` 发布渲染线程参数。
+服务在场不等于功能激活：Mono 计划与桥启动以 `[unity.mono]` 配置为准。
+新跨能力状态优先命名服务，不要为单引擎私货扩展 Host API 字段。
+
+## OBB 路径
+
+`Context.getObbDirs()` 按 `[paths].android_obb_dirs` 的配置顺序返回 `File[]`，
+`Context.getObbDir()` 返回首项。
+相对路径以游戏工作目录为基准，已有路径会规范化，空字符串或非字符串成员占位为
+`null`。未配置或数组为空时返回旧的单项 `android_external_files`，缺省为游戏工作目录。
+查询只解析路径，不创建目录或授予存储权限。
+
 ## 内存模式的当前作用
 
 loader 在初始化 capability 前解析 `[runtime]` 并统一发布，错误类型/范围拒绝。
@@ -48,6 +81,17 @@ preload_audio 当前由 silksong_unity6 的 AudioPreloader 补丁消费，标题
 选择一次，不增加逐帧查询、采样数、锐化强度、缓冲或 pass；linear/100% 路径不使用它。
 这是独立于内存档的设备/驱动可选策略，必须实际场景 A/B 验证后才写入部署配置。
 
+## GLES 动态几何整缓冲失效实验
+
+标题可显式设置 `gpu.glesWholeBufferInvalidate = true`。默认关闭。
+只在主 GLES 3 窗口上下文、`GL_ARRAY_BUFFER`、`GL_ELEMENT_ARRAY_BUFFER`
+或 `GL_COPY_WRITE_BUFFER` 目标、原始标志 `0x36`、偏移为零且覆盖整个
+dynamic/stream 缓冲时，改用整缓冲失效标志。由驱动查询当前目标的实际大小，
+索引缓冲的绑定取自当前 VAO。
+驱动继续管理原对象、存储、刷新、VAO 和绘制。游戏查询映射标志时仍看到原值。
+部分映射、无法验证的映射或超过跟踪上限的映射沿用驱动原路径。
+该实验须使用 `--diag-probes` 构建并设置 `RUDROID_DIAGNOSTICS=1`。退出报告记录实际采用次数。
+
 ## 可选 Wayland 原生缓冲呈现
 
 默认 internal；显式 wayland_native 由合成器放大同 guest 尺寸的 SDL 缓冲：
@@ -74,6 +118,9 @@ SDL 请求结构生命周期与属性复位见 [SDL 约束](../capability/linux/
 只放行 ERROR/FATAL，guest 降低自身最小级别不能取消宿主的生产限制。
 初始化、模块枚举、JNI 成功调用和渲染/纹理计数要求显式 `RUDROID_DIAGNOSTICS=1`；
 CLI 查询、检查结果仍按命令输出。错误级别由调用方指定，不靠正文关键词猜测。
+可选日志能力（如 `platform_log_stderr`）在 `EarlyInit` 阶段通过
+`HostApiV0::register_log_sink` 向 loader 注册输出槽位，可按需替换；未部署日志能力时
+loader 回退到内置 `stderr` 格式化输出。
 启动器暂存第三方 UI 输出到临时目录，仅非零退出、显式错误或诊断会话才保存
 最多 64 KiB 异常上下文，并在同样条件下记录内核退出日志；成功无异常时游戏日志为空。
 显式诊断会话保留实时完整输出；正式捕获始终使用有界缓冲，避免临时日志占满内存或卡。
@@ -94,12 +141,48 @@ Wayland 模式与合成器线性缩放，不改系统显示模式；原生缓冲
 保留原值，切回 GLES 继续使用。GL shader/texture
 改写不作用于 Vulkan，比较时需保证相同画质与工作量。
 
-系统 Mali ICD 保持原样；私有启动环境使用 `DISABLE_WSI_LAYER=1` 禁用固件旧
-implicit layer，`VK_LAYER_PATH` 指向候选 WSI 目录，
-`RUDROID_VULKAN_WSI_LIBRARY` 指向其中已审计的绝对 `.so` 路径。
-桥接显式启用 `VK_LAYER_RUDROID_wayland`，Android surface 转为 SDL 拥有的
-Wayland surface；GBM 精确布局的 DMA-BUF 由 Vulkan 导入，没有逐帧 CPU 拷贝。
-WSI、Vulkan loader 和可选 SDL 查询函数均固定到进程生命周期。
+系统 ICD 或自定义 Vulkan 驱动按标准 loader 路径使用；当系统 ICD 已原生提供
+`VK_KHR_wayland_surface` 时，可不设置 `RUDROID_VULKAN_WSI_LIBRARY` 直接走原生
+Wayland ICD 路径。需要独立 WSI layer（如 Arm Mali 系统驱动）时，设置
+`VK_LAYER_PATH`、`RUDROID_VULKAN_WSI_LIBRARY`（已审计绝对 `.so` 路径）和可选
+`RUDROID_VULKAN_WSI_LAYER`（默认 `VK_LAYER_RUDROID_wayland`）；仅启用
+`VK_LAYER_RUDROID_wayland` 时要求 `DISABLE_WSI_LAYER=1` 禁用固件旧 implicit layer。
+桥接将 Android surface 转为 SDL 拥有的 Wayland surface；GBM 精确布局的 DMA-BUF
+由 Vulkan 导入，没有逐帧 CPU 拷贝。WSI、Vulkan loader 和可选 SDL 查询函数均固定到进程生命周期。
+
+可选的 `vulkan-malisx2/` 是独立 Linux ICD 包，不是 capability。启动器验证固定来源、
+Release 收据、GNU ARM64 ELF 与库 SHA 后，单独执行原生预检；只有该候选成功才开放
+“malisx2 Vulkan”。选择它时，仅游戏子进程设置 `VK_DRIVER_FILES` 与旧 loader 使用的
+`VK_ICD_FILENAMES`，并开启下述 surface 载体。选择系统 Vulkan 或 GLES 时清除这些
+候选设置。两种 Vulkan 使用相同的 `gpu.graphicsApi="vulkan"`，驱动选择不混入游戏
+API 配置。当前候选限现有 Loong/G52 两标题及原生 Wayland；GLES 默认和原有系统路径
+保持不变，候选通过预检仍不能证明完整绘制语义或玩法通过。
+独立 ICD 不链接或加载任何 Rudroid capability，其他 Vulkan 应用也可按标准 loader
+方式选择它。启动器可用 `LAUNCHER_MALISX2_DIR` 引用共享包；WSI 作为另一独立呈现层
+按需配合。构建环境由本工程维护，不构成运行时依赖。
+
+WSI 通过 loader 协商后的实例分派提供 Wayland surface 包装，并继续调用下层
+`vkCreateWaylandSurfaceKHR`；动态导出表未列出该名字不等于没有内部实现。下层
+入口缺失时，系统模式在创建本地 Wayland 对象前返回
+`VK_ERROR_EXTENSION_NOT_PRESENT`，不增加虚假导出或伪造 surface。
+
+仅明确设置 `RUDROID_WSI_HEADLESS_SURFACE=1` 的进程可选用 headless 载体适配：
+layer 在实例创建时为 Wayland 请求给下游启用 `VK_EXT_headless_surface`，并把该
+选择固定在实例内。存在原生 Wayland 创建接口时仍优先使用它；接口缺失时，必须
+取得已启用的下游 `vkCreateHeadlessSurfaceEXT` 和销毁接口，创建真实的
+`VkSurfaceKHR`，再将 Wayland 对象登记到原 surface map。查询与 swapchain 仍由
+Wayland 实现，销毁仍配对下游 DestroySurface 与 map removal；注册失败会销毁
+载体并保留 null 输出。fallback 不静默丢弃 Wayland `pNext` 或 flags：固定输入
+版本不支持这些请求时拒绝创建。扩展未启用、接口缺失或关闭开关均不使用载体。
+此开关不提供 GPU 驱动、GBM/DMA-BUF 或 compositor 能力，也不代表某个候选 ICD
+已通过设备显示或游戏过程验收。
+
+WSI 的 Release 仍保留 ERROR；普通日志仅在 `RUDROID_DIAGNOSTICS=1` 时开启，
+此时 `VULKAN_WSI_DEBUG_LEVEL` 可调整详细程度，但不能关闭 ERROR。分配器只将
+明确的 Linux 资源 errno 映射为 wsialloc v3 `NO_RESOURCE`；未知 GBM 失败沿用
+`NOT_SUPPORTED` 回退并记录实际阶段/errno，该回退不证明格式不支持。调用方的
+Vulkan 错误码也不能单独定位物理 OOM。此故障边界修正不构成 Rocknix 或其他
+未验驱动组合的运行承诺。
 
 没有系统 Wayland 时，启动器可复用已安装的 PortMaster Weston，只读挂载到独立
 临时目录；客户端 SDL/Vulkan 库随可选包局部加载，GLIBC 最低 2.29，音频路径保留。
@@ -126,7 +209,7 @@ TrimUI/A523 丝之歌的缩小缓冲实屏条纹采用上述全尺寸合成策�
 未知组合在原生探测前禁用 Vulkan；新设备路径须经过实屏与玩法验收后再登记，
 驱动自检不能替代视觉验收。再与运行库 `--graphics-features`、标题声明及有界 `--probe-vulkan` 原生探测
 取交集后开放 Vulkan；探测不加载 guest、不呈现游戏帧，结束即释放窗口。
-菜单直接选择 OpenGL ES / Vulkan，只有一个后端的标题隐藏选择。不可用值不能
+菜单直接选择 OpenGL ES / 系统 Vulkan / malisx2 Vulkan，只有一个后端的标题隐藏选择。不可用值不能
 选择，已存无效值在显示前改为可用默认值；启动前拒绝不可用的显式选择。
 缩放无能力时用 100%，其他不适用项显示“禁用”并输出安全值。滤波自动处理。内存和游戏级画质保持独立。选择随游戏保存，
 下次启动应用；后端与 Unity 启动参数一起原子写回，不改变内存档或其他参数。
@@ -145,7 +228,7 @@ TrimUI/A523 丝之歌的缩小缓冲实屏条纹采用上述全尺寸合成策�
 
 三项是 force-gfx-direct、gfx-threading-mode、gfx-disable-mt-rendering。
 只接受精确原生兼容表；当前为 Unity 6000.0.61f1 ARM64，依据见
-[原生构建 fixture](../common/host-config/tests/fixtures/unity-render-thread-build.md)。
+[原生构建 fixture](../capability/unity/common/tests/fixtures/unity-render-thread-build.md)。
 启动检查有限 ELF header/note/build ID/文件长，不靠相邻版本或配置键猜兼容。
 原始 boot.config 必须 ≤64KiB、UTF-8、三项唯一且为 0/1；参数 NUL、超长、
 冲突或未知契约拒绝。engine 完全跳过预检/boot 投影，保留引擎行为。
@@ -217,7 +300,7 @@ collect_managed 只在额外卸载完成后生效，导出缺失独立降级，�
 6000.0.61f1/ARM64 的指针宽 handle；旧版模拟适配不等于获准。
 无参 void CallLowMemory 可经元数据单独验证；带 usage 的版本通知仍要求已验 ABI。
 停止在 nativeDone 前撤销托管工作，在途调用返回后不得继续访问失效服务。
-HUD/配置 hook 的受限缺 getter 回退见[独立 ABI fixture](../common/tests/fixtures/legacy-gc-handle-abi.md)，
+HUD/配置 hook 的受限缺 getter 回退见[独立 ABI fixture](../capability/unity/common/tests/fixtures/legacy-gc-handle-abi.md)，
 不扩大压力回收版本表。详细生命周期见[memory_policy](../capability/unity/memory_policy/AGENTS.md)。
 Unity 自己判断闲置引用/Addressables 配对；不以全包 UnloadAllAssetBundles 冒充标准回收。
 
@@ -259,7 +342,7 @@ ThreadPlacement 保存初始允许核及容量；它自己创建的混音线程�
 
 ## 帧率上限
 
-两个 profile 默认 unity.target_fps=90、unity.render_sleep_us=0。
+三个 Unity profile（共享 player_lifecycle）默认 unity.target_fps=90、unity.render_sleep_us=0。
 用 monotonic 时钟量本轮输入/render/driver 等待，只补剩余周期，慢帧不补睡眠/追帧。
 target_fps 接受 1..240，0 显式取消上限，其他值回退 90；render_sleep_us 接受
 0..1000000，旧非零值与剩余周期取较大值而不相加。调用节奏不保证唯一显示 FPS。

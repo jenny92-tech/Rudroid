@@ -1,0 +1,20 @@
+[package]
+name = "rudroid-unity-common"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Shared Unity/IL2CPP/Mono helpers (plain library, no descriptor)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-host-config = { path = "../../../common/host-config" }
+libc = "0.2"
+serde_json = "1"
+toml = "0.9"
+
+[build-dependencies]
+rudroid-native-build = { path = "../../../native-build" }

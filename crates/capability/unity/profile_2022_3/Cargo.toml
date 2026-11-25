@@ -1,0 +1,21 @@
+[package]
+name = "rudroid-unity-profile-2022-3"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Unity 2022.3 engine profile capability (Soul Knight candidate)"
+
+[lib]
+# Artifact name == capability id (file stem), like the C++ kit.
+name = "unity_2022_3"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+diag-probes = ["rudroid-unity-player-lifecycle/diag-probes"]
+
+[dependencies]
+rudroid-common = { path = "../../../common" }
+rudroid-unity-common = { path = "../common" }
+rudroid-unity-player-lifecycle = { path = "../player_lifecycle" }

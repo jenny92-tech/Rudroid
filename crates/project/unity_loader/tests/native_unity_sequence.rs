@@ -25,7 +25,7 @@ fn compare_legacy_native_startup_sequence() {
     let capabilities=unsafe { load_deploy_dir(&kit,&selection) }.unwrap();
     let capabilities=bring_up(capabilities,config.package().package_name.as_deref()).unwrap();
     runtime::bring_up_sdl_session(&capabilities,&config).unwrap();
-    runtime::prepare_unity_runtime(&capabilities).unwrap();
+    runtime::prepare_engine_runtime(&capabilities).unwrap();
     let plan=GuestPlan::from_config(&config).unwrap();
     // SAFETY: local licensed ARM64 guest, private paths, pinned native providers.
     let events=unsafe { guest::bring_up(&capabilities,&plan) }.unwrap();
@@ -35,7 +35,7 @@ fn compare_legacy_native_startup_sequence() {
         eprintln!("[SEQUENCE-PROBE] mapped; diagnostic bootstrap delay {delay}ms");
         std::thread::sleep(std::time::Duration::from_millis(delay));
     }
-    runtime::bootstrap_unity_runtime(&capabilities,"lib/arm64-v8a").unwrap();
+    runtime::bootstrap_engine_runtime(&capabilities,"lib/arm64-v8a").unwrap();
     if std::env::var_os("RUDROID_C_JNI_SEQUENCE").is_some() {
         let host=host_api::table();
         let vm=host.java_vm().unwrap();
@@ -50,6 +50,6 @@ fn compare_legacy_native_startup_sequence() {
             assert_eq!(version,0x10006);
         }
     }
-    let _completion = runtime::run_unity_runtime(&capabilities).unwrap();
+    let _completion = runtime::run_engine_runtime(&capabilities).unwrap();
     rudroid_unity_loader::terminate_completed_guest(&capabilities, 0);
 }

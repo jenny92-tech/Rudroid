@@ -1,0 +1,19 @@
+# ARM64 Android Unity 6 Player using the opt-in native Mono bridge.
+# Title-specific Android addons and profile selection still follow the player.
+platform_log_stderr
+android_base
+android_jni_vm
+reply_catalog
+android_elf_load
+unity_mono
+android_bionic
+android_native_events
+android_media_fallback
+android_zlib
+android_assets
+platform_sdl_runtime
+unity_6
+sdk_fmod
+sdk_unity_burst
+sdk_unity_helpers
+platform_android_asset_packs

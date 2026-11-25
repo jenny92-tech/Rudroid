@@ -15,10 +15,10 @@ Capability `unity_memory_policy`, kind `runtime`, requires `il2cpp_patch`; optio
 - Extra `UnloadUnusedAssets` and managed GC default off; explicit title configuration can enable them. Pre-warmup ticks skip sampling. Idle/cooldown samples retain all RAM/memsw hysteresis inputs but defer swap/PSI diagnostic I/O until a real pressure action; never skip recovery observations during cooldown.
 
 ## Constraints
-- Validate static-ness, argument count, return type and byref flags before invoking; adapt through metadata, never offsets. Degrade explicitly on non-Linux or missing exports (no Mono).
+- Validate static-ness, argument count, return type and byref flags before invoking via unity-common; adapt through metadata, never offsets. Degrade explicitly on non-Linux or missing exports (no Mono).
 - Never reclaim when memory is ample. Failed samples are skipped, never treated as zero headroom; never add `SwapFree` to RAM.
 - Read procfs and cgroup files only; never change swappiness, swap, zram or cache settings.
-- Hold at most one GC handle, released on completion, stop or drop. The handle ABI comes only from common's exact-build table (6000.0.61f1/ARM64); an unverified ABI never unloads.
+- Hold at most one GC handle, released on completion, stop or drop. The handle ABI comes only from unity-common's exact-build table (6000.0.61f1/ARM64); an unverified ABI never unloads.
 - The host must let all in-flight player callbacks return before nativeDone; managed calls recheck stop after invocation and never chain rooting/unboxing/access after a stop request.
 - Only the owning player thread uses the controller; never busy-wait on `AsyncOperation`.
 
@@ -26,9 +26,9 @@ Capability `unity_memory_policy`, kind `runtime`, requires `il2cpp_patch`; optio
 
 | Name | Path | Responsibility |
 |------|------|----------------|
-| Manifest | `Cargo.toml` | `cdylib` + `rlib` `unity_memory_policy`; depends only on common |
+| Manifest | `Cargo.toml` | `cdylib` + `rlib` `unity_memory_policy`; depends on common and unity-common |
 | Controller | `src/lib.rs` | Descriptor, config, event subscription, owner-thread `Controller` |
-| Engine | `src/engine.rs` | Metadata checks over common `il2cpp::Il2cpp`, handle ABI gate, `GcRoot`-held operation |
+| Engine | `src/engine.rs` | Metadata checks over unity-common `il2cpp::Il2cpp`, handle ABI gate, `GcRoot`-held operation |
 | Policy | `src/policy.rs` | `ReclaimPolicy` notify, grace, recheck, unload, cooldown |
 | Pressure | `src/pressure.rs` | Read-only meminfo/cgroup/PSI sampling and `PressureGate` |
 | Unit tests | `tests/unit/` | Fake IL2CPP engine, policy paths, cgroup and gate sampling |

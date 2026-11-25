@@ -30,6 +30,10 @@ direct dependency of the loader. Uses the target's existing GBM driver.
 - On any failure, close private fds/BOs. Transfer fd ownership only with success.
   Library/code remain pinned after allocator destruction; GBM buffers use native
   driver lifetimes, not Rust borrowed pointers stored in a device handle.
+- Capture a fresh errno before cleanup after failed GBM calls. Only attested
+  resource errors return v3 `NO_RESOURCE`; unknown driver failures retain the
+  existing `NOT_SUPPORTED` fallback with explicit stage/errno evidence. The
+  fallback does not prove format rejection or physical memory exhaustion.
 - Build/test only via the root fixed Docker entry. Real AFBC import/presentation
   requires target-device evidence; pure tests do not establish driver support.
 
@@ -38,4 +42,4 @@ direct dependency of the loader. Uses the target's existing GBM driver.
 | Path | Responsibility |
 |------|----------------|
 | `src/lib.rs` | Native wsialloc/GBM ABI, immutable function table and RAII ownership |
-| `tests/unit/lib.rs` | ABI layout, DRM-node selection, rejected flags/geometry and partial-failure ownership contracts |
+| `tests/unit/lib.rs` | ABI/layout, DRM-node selection, fresh errno classification, candidate recovery and partial-failure fd ownership |

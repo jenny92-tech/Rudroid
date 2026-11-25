@@ -1,3 +1,6 @@
+//! INPUT: shared JNI session and Play services method registrations
+//! OUTPUT: Google API proxy and task replies
+//! POS: Android Google services compatibility capability
 //! rudroid-android-addon-gms: GMS Android Addon (ticket 17; shared-session
 //! registration ticket 56).
 //!

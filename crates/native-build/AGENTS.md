@@ -14,6 +14,14 @@ Package `rudroid-native-build`, a plain library with no descriptor and no depend
   Docker by `scripts/vulkan-input.py`. Existing GNU compilers and wayland-scanner
   build Wayland only, with the first-party Rust wsialloc static archive and exact GBM
   DMA-BUF layouts. No experimental FIFO thread or system installation.
+  Null optional dispatch entries reject before native calls; Wayland surface
+  creation checks the downstream entrypoint before allocating local objects.
+  `RUDROID_WSI_HEADLESS_SURFACE=1` is sampled at instance creation and enables
+  the lower headless extension for Wayland only. If native Wayland creation is
+  absent, a real headless surface carries the existing Wayland object/map;
+  system mode still rejects. Carrier creation rejects unsupported pNext/flags,
+  preserves allocation callbacks and destroys the lower handle on map failure.
+  Release keeps ERROR logs; ordinary logs require explicit diagnostics.
   Artifacts, the root noncommercial LICENSE/NOTICE, dependency notices and
   upstream provenance stay in `vulkan-wsi/`.
 - Optional portable Wayland clients build the pinned SDL source with GNU
@@ -35,5 +43,6 @@ Package `rudroid-native-build`, a plain library with no descriptor and no depend
 | External WSI dependency | `src/vulkan_wsi.rs`, `src/wsi_main.rs` | Optional fixed GNU ARM64 build after the Rust kit; never linked into a capability |
 | Portable clients | `src/portable_wayland.rs` | Fixed Wayland SDL build and generic Vulkan loader bundle, selected only for an optional private compositor route |
 | WSI ABI gate | `src/vulkan_wsi_abi.c` | Compile-time native wsialloc layout assertions |
-| Vendor patch | `patches/vulkan-wsi-native-allocation.patch` | Reuse GBM layout allocation; share one native Wayland sync object through the last live surface handle |
+| Vendor patch | `patches/vulkan-wsi-native-allocation.patch` | Allocation/sync ownership, null-dispatch rejection, Release logging and explicit real headless carriers; emits `wsi/wayland/surface_carrier.hpp` |
 | Unit tests | `tests/unit/lib.rs` | Optimization per profile, C vs assembly args, object names, toolchain |
+| WSI contract | `tests/unit/vulkan_wsi.rs`, `tests/fixtures/vulkan_wsi_contract.cpp` | Patched dispatch/log/carrier helpers, original-source negative control and CPU-only extension, ownership and cleanup checks |

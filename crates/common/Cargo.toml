@@ -12,6 +12,3 @@ path = "src/lib.rs"
 [dependencies]
 # arm64_detour (ticket 87 Phase A): cache maintenance + W^X patching.
 libc = "0.2"
-
-[build-dependencies]
-rudroid-native-build = { path = "../native-build" }

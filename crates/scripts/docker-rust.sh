@@ -5,7 +5,7 @@
 set -euo pipefail
 
 usage() {
-    echo 'Usage: bash crates/scripts/docker-rust.sh {build|test|check} [--release | --debug] [--thin-lto] [--pgo-generate | --pgo-use <profdata>] [--sdl | --vulkan | --portable-wayland] [-- <cargo args>] (default: Release)' >&2
+    echo 'Usage: bash crates/scripts/docker-rust.sh {build|test|check} [--release | --debug] [--thin-lto] [--diag-probes] [--pgo-generate | --pgo-use <profdata>] [--sdl | --vulkan | --portable-wayland | --malisx2 [--driver-only]] [-- <cargo args>] (default: Release)' >&2
     exit 2
 }
 [ "$#" -gt 0 ] || usage
@@ -15,7 +15,10 @@ args=(--locked)
 features=''
 sdl=0
 vulkan=0
+diag_probes=0
 portable_wayland=0
+malisx2=0
+driver_only=0
 release=1
 profile=''
 thin_lto=0
@@ -30,8 +33,11 @@ while [ "$#" -gt 0 ]; do
         --pgo-generate) [ -z "$pgo_mode" ] || usage; pgo_mode=generate ;;
         --pgo-use) [ -z "$pgo_mode" ] && [ "$#" -ge 2 ] || usage; pgo_mode=use; pgo_file="$2"; shift ;;
         --sdl) sdl=1 ;;
+        --diag-probes) diag_probes=1; sdl=1 ;;
         --vulkan) vulkan=1; sdl=1 ;;
         --portable-wayland) portable_wayland=1; vulkan=1; sdl=1 ;;
+        --malisx2) malisx2=1; vulkan=1; sdl=1 ;;
+        --driver-only) driver_only=1 ;;
         --) shift; extra=("$@"); break ;;
         *) usage ;;
     esac
@@ -39,8 +45,23 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$release" = 0 ] || args+=(--release)
 [ "$portable_wayland" = 0 ] || [ "$action" = build ] || usage
+[ "$malisx2" = 0 ] || { [ "$action" = build ] && [ "$release" = 1 ]; } || usage
+if [ "$driver_only" = 1 ]; then
+    [ "$malisx2" = 1 ] && [ "$portable_wayland" = 0 ] && [ "$thin_lto" = 0 ] && [ -z "$pgo_mode" ] || usage
+    # A generic ICD needs neither Cargo capabilities nor the Rudroid WSI build.
+    vulkan=0
+    sdl=0
+fi
 if [ "$sdl" = 1 ]; then features='rudroid-linux-sdl-runtime/sdl'; fi
 if [ "$vulkan" = 1 ]; then features+=',rudroid-linux-sdl-runtime/vulkan'; fi
+if [ "$diag_probes" = 1 ]; then
+    [ "$driver_only" = 0 ] || usage
+    features+=',rudroid-linux-sdl-runtime/diag-probes,rudroid-unity-player-lifecycle/diag-probes'
+    # Nested single-profile builds must replay the linked lifecycle feature.
+    for unity_profile in 2021-3 2022-3 6; do
+        features+=",rudroid-unity-profile-${unity_profile}/diag-probes"
+    done
+fi
 # Cargo profile environment reaches nested fixture builds as well. Keep the
 # normal Release profile/output directory and fingerprint this codegen input.
 codegen_options=()
@@ -55,14 +76,20 @@ fi
 # Targeted check/test (-p/--package) narrows the workspace; build stays kit-wide.
 scoped=0
 for arg in "${extra[@]+"${extra[@]}"}"; do
-    case "$arg" in -p|--package|--package=*) scoped=1 ;; esac
+    case "$arg" in
+        -p|--package|--package=*) scoped=1 ;;
+        -F|-F*|--features|--features=*|--all-features|--no-default-features)
+            echo "docker-rust.sh: pass feature modes via wrapper flags (--sdl/--vulkan/--diag-probes), not after '--'." >&2
+            exit 2
+            ;;
+    esac
 done
 [ "$action" != build ] || [ "${#extra[@]}" -eq 0 ] || usage
 [ "$scoped" = 1 ] || args=(--workspace "${args[@]}")
 [ -z "$features" ] || args+=(--features "$features")
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 game_options=()
-if [ -n "${RUDROID_VAMPIRE_GAME_DIR:-}" ]; then
+if [ "$driver_only" = 0 ] && [ -n "${RUDROID_VAMPIRE_GAME_DIR:-}" ]; then
     [ -d "$RUDROID_VAMPIRE_GAME_DIR" ] || { echo 'RUDROID_VAMPIRE_GAME_DIR must be an existing game-data directory.' >&2; exit 2; }
     game_dir="$(cd "$RUDROID_VAMPIRE_GAME_DIR" && pwd -P)"
     # Original game files stay outside the source repository and remain read-only.
@@ -78,11 +105,18 @@ fi
 [ "$platform" = linux/arm64 ] || { echo "Wrong image platform: $platform" >&2; exit 1; }
 cache="$root/crates/target/docker-linux-arm64"
 mkdir -p "$cache/target" "$cache/cargo"
+network_options=()
 if [ "$vulkan" = 1 ]; then
     python3 "$root/crates/scripts/vulkan-input.py" --cache "$cache/target/native-inputs/vulkan-wsi"
+    network_options=(--network=none -e CARGO_NET_OFFLINE=true)
 fi
 if [ "$portable_wayland" = 1 ]; then
     python3 "$root/crates/scripts/wayland-input.py" --cache "$cache/target/native-inputs/portable-wayland"
+    network_options=(--network=none -e CARGO_NET_OFFLINE=true)
+fi
+if [ "$malisx2" = 1 ]; then
+    python3 "$root/crates/scripts/malisx2-input.py" --cache "$cache/target/native-inputs/malisx2"
+    network_options=(--network=none -e CARGO_NET_OFFLINE=true)
 fi
 pgo_options=()
 if [ -n "$pgo_mode" ]; then
@@ -107,6 +141,7 @@ mkdir -p "$cache/target/mesa-shader-cache"
 command=(cargo "$action")
 if [ "$action" = build ]; then command=(bash scripts/build-kit.sh); fi
 if [ "$action" = build ] && [ "$vulkan" = 1 ]; then command=(bash scripts/vulkan-kit.sh); fi
+if [ "$driver_only" = 1 ]; then command=(bash scripts/malisx2-kit.sh); args=(); fi
 display=0
 if [ "$action" = test ] && [ "$sdl" = 1 ]; then
     # Keep the display server stable while lifecycle tests close their last
@@ -141,10 +176,12 @@ while :; do
         -e "RUDROID_KIT_FEATURES=${features:+--features $features}" \
         -e "RUDROID_DIAGNOSTICS=${RUDROID_DIAGNOSTICS:-0}" \
         -e "RUDROID_PORTABLE_WAYLAND=$portable_wayland" \
+        -e "RUDROID_MALISX2=$malisx2" \
+        "${network_options[@]+"${network_options[@]}"}" \
         "${codegen_options[@]+"${codegen_options[@]}"}" \
         "${pgo_options[@]+"${pgo_options[@]}"}" \
         "${game_options[@]+"${game_options[@]}"}" \
-        "$image" "${command[@]}" "${args[@]}" "${extra[@]+"${extra[@]}"}" || status=$?
+        "$image" "${command[@]}" "${args[@]+"${args[@]}"}" "${extra[@]+"${extra[@]}"}" || status=$?
     # 125 with the name taken means another caller won the race; queue again
     # (a brief pause lets a container that was still being created start).
     if [ "$status" = 125 ]; then sleep 3; fi

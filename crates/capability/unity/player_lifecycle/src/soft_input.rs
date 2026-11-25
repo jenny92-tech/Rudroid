@@ -3,6 +3,7 @@
 //! POS:    safe legacy Unity Java keyboard bridge; idle frames do no keyboard work
 #![forbid(unsafe_code)]
 use rudroid_common::{host_api::HostApiV0,jni_abi::declare_field,jni_env::{Arg,JObject,JniEnv,Native}};
+use rudroid_unity_common::dispatch_player_input_event;
 use std::{ffi::CStr,sync::{OnceLock,atomic::{AtomicBool,AtomicU64,Ordering}}};
 
 const PLAYER:&CStr=c"com/unity3d/player/UnityPlayer";
@@ -125,7 +126,7 @@ pub(super) fn consume(env:JniEnv,player:JObject,event:JObject)->Result<bool,()> 
         if keys.0.contains(&code){finish(env,player,false);}
         else if keys.1.contains(&code){finish(env,player,true);}
         else {
-            let typed=match code {100|52=>Some(b'x'),99|53=>Some(b'y'),29..=54=>Some(b'a'+(code-29) as u8),7..=16=>Some(b'0'+(code-7) as u8),62=>Some(b' '),_=>None};
+            let typed=match code {99|52=>Some(b'x'),100|53=>Some(b'y'),29..=54=>Some(b'a'+(code-29) as u8),7..=16=>Some(b'0'+(code-7) as u8),62=>Some(b' '),_=>None};
             if typed.is_none()&&code!=67{return Ok(true);}
             let old=env.get_object_field(player,FIELDS.get().unwrap()[0] as JObject);
             let mut value=if old.is_null(){Vec::new()}else{env.string_utf16(old).unwrap_or_default()};env.delete_local_ref(old);
@@ -140,8 +141,7 @@ pub(super) fn consume(env:JniEnv,player:JObject,event:JObject)->Result<bool,()> 
 }
 extern "C" fn inject(env:JniEnv,player:JObject,event:JObject)->u8 {
     match consume(env,player,event){Ok(true)=>1,Err(())=>0,Ok(false)=>{
-        let class=env.get_object_class(player);let method=env.method(class,c"nativeInjectEvent",c"(Landroid/view/InputEvent;)Z");env.delete_local_ref(class);
-        method.map_or(0,|m|u8::from(env.call_boolean(player,m,&[Arg::object(event)])))
+        u8::from(dispatch_player_input_event(env,player,event).unwrap_or(false))
     }}
 }
 pub(super) fn register(env:JniEnv,host:&HostApiV0)->i32 {

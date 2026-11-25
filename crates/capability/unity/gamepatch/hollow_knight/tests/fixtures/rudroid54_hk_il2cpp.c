@@ -491,6 +491,10 @@ static const struct Rudroid54HkClass shadow_reference_classes[] = {
 };
 uint32_t il2cpp_method_get_param_count(void *raw) { return ((const struct Rudroid54HkMethod *)raw)->argc; }
 
+// All MethodInfo records in this fixture describe ordinary non-generic methods.
+_Bool il2cpp_method_is_generic(void *method) { (void)method; return 0; }
+_Bool il2cpp_method_is_inflated(void *method) { (void)method; return 0; }
+
 uint32_t il2cpp_method_get_flags(void *raw, uint32_t *implementation) {
     const struct Rudroid54HkMethod *method = raw;
     if (implementation) *implementation = 0;

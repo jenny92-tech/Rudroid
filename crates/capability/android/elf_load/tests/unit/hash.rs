@@ -42,6 +42,10 @@ fn sysv_hash_known_values() {
     assert_eq!(sysv_hash(""), 0);
     assert_eq!(sysv_hash("printf"), 0x0779_05a6);
     assert_eq!(sysv_hash("exit"), 0x0006_cf04);
+    // GNU version records store SysV hashes. These values are from the real
+    // Soul Knight libanort.so VERDEF/VERNEED entries.
+    assert_eq!(sysv_hash("VERS_1.1"), 0x0a79_27b1);
+    assert_eq!(sysv_hash("LIBC"), 0x0005_0d63);
 }
 
 #[test]

@@ -32,8 +32,9 @@ pub fn build(target: &Path, release: bool) {
     let profile = if release { "release" } else { "debug" };
     let out = target.join("native-objects/portable-wayland/sdl-2.32.6").join(profile);
     fs::create_dir_all(&out).expect("SDL native output");
+    let sources_meta = fs::read_to_string(inputs.join("sources.json")).expect("portable Wayland sources.json");
     let cflags = if release { "-O2 -fPIC -DNDEBUG" } else { "-O0 -g -fPIC" };
-    let stamp = format!("{CONFIGURE:?}\n{cflags}\n");
+    let stamp = format!("{CONFIGURE:?}\n{cflags}\n{sources_meta}\n");
     let changed = fs::read_to_string(out.join("configure.id")).ok().as_deref() != Some(stamp.as_str());
     if changed || !out.join("Makefile").is_file() {
         run(Command::new("bash").arg(inputs.join("sdl-2.32.6/configure")).args(CONFIGURE)
@@ -54,14 +55,27 @@ pub fn build(target: &Path, release: bool) {
     fs::write(out.join("configure.id"), stamp).expect("SDL compile identity");
     let dest = target.join(profile).join("portable-wayland");
     fs::create_dir_all(&dest).expect("private client bundle");
-    for (from, to) in [
-        (out.join("build/.libs/libSDL2-2.0.so.0"), "libSDL2-2.0.so.0"),
+    let sdl_src = out.join("build/.libs/libSDL2-2.0.so.0");
+    let sdl_dst = dest.join("libSDL2-2.0.so.0");
+    if release {
+        run(Command::new("strip").args(["--strip-unneeded", "-o"]).arg(&sdl_dst).arg(&sdl_src));
+    } else {
+        fs::copy(&sdl_src, &sdl_dst).unwrap_or_else(|error| panic!("{}: {error}", sdl_src.display()));
+    }
+    let mut copies: Vec<(std::path::PathBuf, &str)> = vec![
         (inputs.join("loader/libvulkan.so.1"), "libvulkan.so.1"),
         (inputs.join("sdl-2.32.6/LICENSE.txt"), "LICENSE-SDL.txt"),
         (inputs.join("loader/LICENSE-Vulkan-Loader.txt"), "LICENSE-Vulkan-Loader.txt"),
-        (target.join("native-inputs/vulkan-wsi/headers/LICENSES/Apache-2.0.txt"), "LICENSE-Apache-2.0.txt"),
         (inputs.join("sources.json"), "sources.json"),
-    ] {
+    ];
+    let apache_local = inputs.join("loader/LICENSE-Apache-2.0.txt");
+    let apache_wsi = target.join("native-inputs/vulkan-wsi/headers/LICENSES/Apache-2.0.txt");
+    if apache_local.is_file() {
+        copies.push((apache_local, "LICENSE-Apache-2.0.txt"));
+    } else if apache_wsi.is_file() {
+        copies.push((apache_wsi, "LICENSE-Apache-2.0.txt"));
+    }
+    for (from, to) in copies {
         fs::copy(&from, dest.join(to)).unwrap_or_else(|error| panic!("{}: {error}", from.display()));
     }
 }

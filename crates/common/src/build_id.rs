@@ -1,3 +1,6 @@
+//! INPUT: compile-time kit identity and participant build strings
+//! OUTPUT: same-build validation
+//! POS: shared loader and capability identity contract
 //! Same-build identity shared by the loader and every capability cdylib.
 //!
 //! Build scripts inject `RUDROID_RUNTIME_BUILD_ID` (see ticket 06); when it

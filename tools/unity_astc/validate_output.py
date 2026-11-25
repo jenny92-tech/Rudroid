@@ -5,12 +5,13 @@
 # Copyright (c) 2026 jenny92-tech and the Rudroid contributors
 import gc
 import hashlib
-import ntpath
 from pathlib import Path
 
 import UnityPy
 from UnityPy.files import SerializedFile
 from UnityPy.streams import EndianBinaryReader
+
+from .resource_refs import internal_resource_name, resource_basename
 
 
 def serialized_layout(file, changed):
@@ -51,8 +52,8 @@ def stream_snapshot(file, prefixes, ranges):
     return result
 
 
-def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=None):
-    from .astc_retier import check_streams
+def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=None, protected_fonts=()):
+    from .astc_retier import check_streams, collect_font_textures
     gc.collect()
     env = UnityPy.load(str(path))
     file = env.file
@@ -64,6 +65,8 @@ def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=N
     ranges = {}
     # The output keeps the original external resource filenames and byte ranges.
     check_streams(env, resource_root / Path(path).name)
+    fonts = {(resource_basename(owner).lower(), pid)
+             for owner, pid in collect_font_textures(env, protected_fonts)}
     for obj in env.objects:
         key = (obj.assets_file.name, obj.path_id)
         if key in result["objects"]:
@@ -79,10 +82,12 @@ def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=N
                 settings.pop(field, None)
         result["textures"][key] = settings
         if key in changed:
-            from .texture_policy import astc_block_of, astc_bytes, cpu_pixels_protected
+            from .texture_policy import astc_block_of, astc_bytes, cpu_pixels_protected, sensitive_name_reason
             block = astc_block_of(texture.m_TextureFormat)
             if cpu_pixels_protected(texture):
                 raise ValueError(f"CPU-readable texture was selected: {key}")
+            if (resource_basename(obj.assets_file.name).lower(), obj.path_id) in fonts or sensitive_name_reason(texture.m_Name):
+                raise ValueError(f"font or sensitive data texture was selected: {key}")
             if block is not None and len(texture.get_image_data()) != astc_bytes(
                     texture.m_Width, texture.m_Height, block, texture.m_MipCount or 1):
                 raise ValueError(f"incomplete ASTC mip payload: {key}")
@@ -94,7 +99,7 @@ def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=N
                 if stream.size:
                     if texture.image_data:
                         raise ValueError(f"changed texture has both inline and streamed pixels: {key}")
-                    name = ntpath.basename(stream.path)
+                    name = internal_resource_name(file, stream.path)
                     if not isinstance(file.files.get(name), EndianBinaryReader):
                         raise ValueError(f"changed texture is not in its internal resource stream: {key}")
                     ranges.setdefault(name, []).append((stream.offset, stream.size))
@@ -104,11 +109,12 @@ def snapshot(path, resource_root, changed=frozenset(), expected=None, prefixes=N
     return result
 
 
-def validate(source, output, expected):
+def validate(source, output, expected, protected_fonts=()):
     source, output = Path(source), Path(output)
+    protected_fonts = tuple(protected_fonts)
     changed = set(expected)
-    original = snapshot(source, source.parent, changed)
-    converted = snapshot(output, source.parent, changed, expected, original["streams"])
+    original = snapshot(source, source.parent, changed, protected_fonts=protected_fonts)
+    converted = snapshot(output, source.parent, changed, expected, original["streams"], protected_fonts)
     if original != converted:
         differences = [key for key in original if original[key] != converted[key]]
         raise ValueError("converted bundle changed invariant(s): " + ", ".join(differences))

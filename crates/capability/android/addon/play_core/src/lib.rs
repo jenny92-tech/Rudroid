@@ -116,7 +116,7 @@ fn join_shared_session(api: &HostApiV0, vm: JavaVm) -> Result<(), &'static str> 
 }
 
 extern "C" fn review_manager(env: JniEnv, _class: JObject, _context: JObject) -> JObject {
-    let class = env.find_class(c"com/google/android/play/core/review/ReviewManager");
+    let class = rudroid_common::jni_abi::declare_class(env, c"com/google/android/play/core/review/ReviewManager");
     let object = env.alloc_object(class);
     env.delete_local_ref(class);
     object

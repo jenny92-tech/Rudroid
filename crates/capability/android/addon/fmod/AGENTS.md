@@ -7,7 +7,26 @@ Capability `sdk_fmod`, kind `android_addon`, requires `android_base`; package `r
 No SDL code: playback belongs to the Linux backend that implements `org/rudroid/runtime/AudioOutput`.
 
 ## Design
-- `rudroid_plugin_register_jni` registers the `org/fmod` stubs (guest libraries present or not), then joins the session: `FMOD.checkInit()Z` must answer true.
+- The default `rudroid_plugin_register_jni` registers the `org/fmod` stubs (guest libraries present or not), then joins the session: `FMOD.checkInit()Z` must answer true.
+- `sdk_fmod.embedded_unity_audio` (default false) selects the engine-embedded
+  posture for titles that embed FMOD inside `libunity`. It changes only which
+  Java/bridge surface this addon provides: the `org/fmod` AudioDevice and
+  FMODAudioDevice natives plus the real `AudioOutput`/PCM mixer lifecycle stay
+  registered, while the `org/fmod/FMOD` `checkInit` constant-true and empty
+  `init` helper are neither registered nor queried. `plugin_init` configures the
+  mixer policy and installs NO Unity/Fmod/FmodStudio subscription and no
+  `SetOutput` detour, so the forced-NOSOUND + OK fallback is unreachable even if
+  a `Fmod` event is emitted. `fmodGetInfo`/`fmodProcess` always stay the
+  engine's: this mode never registers, copies or stubs them, and an unknown or
+  failed engine format/output stays honest. The recorded
+  `FmodOutcome::EmbeddedUnityAudio` states only that the shared-VM class surface
+  registered — never mixer-open, audible output, format or SDK success. Absent or
+  false keeps every existing title on the separate-`libfmod` path unchanged.
+- Embedded registration requires a shared VM. Its original Java pump ignores
+  `fmodProcess`'s int return; the bridge follows that convention while retaining
+  explicit JNI/output failures. The separate-library mode keeps its existing
+  status interpretation. The teardown fixture covers a nonzero embedded return,
+  real constructor dispatch, draining, and owner-stop joins before state release.
 - `FMODAudioDevice.start` takes the single mixer lease and spawns `rudroid-fmod-mixer`, looping `fmodProcess` → `AudioOutput.write` on a direct PCM16 buffer, reopening on format change. It consumes the reference clocked/silence/cached-format/diagnostic switches: transient invalid formats reuse only a complete validated cache when opted in; unready mixers output cleared PCM; clocked mode follows one block deadline. The VM zeros only owned PCM storage before synchronous mixing; borrowed buffers are refused.
 - The pre-native Lifecycle hook blocks new starts but keeps existing mixers processing native streaming-release commands. The engine's AudioDevice.stop/close callback synchronously joins its producer before freeing mixer state; a post-native Lifecycle hook provides the final join and partial-init cleanup. It creates no extra worker or frame work.
 - A bounded AudioOutput queue timeout accepts zero frames. The producer continues

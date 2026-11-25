@@ -212,16 +212,19 @@ impl AssetResolver {
             }
         }
         // Explicit split identities take precedence over base aliases, including when the APK was removed after extraction.
-        let split = bytes.windows(b"split_".len()).position(|w| w == b"split_");
-        if let Some(at) = split {
-            let tail = &bytes[at + b"split_".len()..];
-            for marker in [&b".apk!/assets/"[..], &b".apk/assets/"[..]] {
-                if let Some(end) = tail.windows(marker.len()).position(|w| w == marker) {
+        for marker in [&b".apk!/assets/"[..], &b".apk/assets/"[..]] {
+            if let Some(end) = bytes.windows(marker.len()).position(|w| w == marker) {
+                let prefix = &bytes[..end];
+                let base_start = prefix
+                    .iter()
+                    .rposition(|&b| b == b'/')
+                    .map_or(0, |slash| slash + 1);
+                if let Some(pack_bytes) = prefix[base_start..].strip_prefix(b"split_") {
                     if !self.packs_enabled {
                         return Err(AssetError::Missing);
                     }
-                    let pack = CString::new(&tail[..end]).map_err(|_| AssetError::Invalid)?;
-                    let rel = relative(&tail[end + marker.len()..], false)?;
+                    let pack = CString::new(pack_bytes).map_err(|_| AssetError::Invalid)?;
+                    let rel = relative(&bytes[end + marker.len()..], false)?;
                     if let Some(path) = self.resolve(&rel, PACK, Some(&pack))? {
                         return Ok(Some(path));
                     }

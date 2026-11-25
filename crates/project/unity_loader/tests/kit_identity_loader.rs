@@ -32,6 +32,7 @@ const KIT_MEMBER_ARTIFACTS: &[&str] = &[
     "android_jni_vm",
     "rudroid_android_reply_catalog",
     "unity_2021_3",
+    "unity_2022_3",
     "unity_6",
     "il2cpp_patch",
     "platform_sdl_runtime",

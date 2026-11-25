@@ -23,6 +23,65 @@ static _Atomic bool global_utf8 = true; // Android starts in C.UTF-8.
 static _Thread_local GuestLocale *current;
 #define GLOBAL ((GuestLocale *)(intptr_t)-1)
 _Static_assert(sizeof(GuestLocale) == 8 && LC_ALL_MASK == 0x1fbf, "Android ARM64 locale ABI");
+
+// AOSP bionic libc/upstream-openbsd/lib/libc/gen/ctype_.c (BSD-2-Clause):
+// the legacy ELF symbol is a pointer to this 257-byte ASCII compatibility
+// table, not a function. The leading byte is the EOF sentinel.
+#define CT_U 0x01
+#define CT_L 0x02
+#define CT_N 0x04
+#define CT_S 0x08
+#define CT_P 0x10
+#define CT_C 0x20
+#define CT_X 0x40
+#define CT_B 0x80
+static const char ctype_table[1 + 256] = {
+    0,
+    CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C,
+    CT_C, CT_C|CT_S, CT_C|CT_S, CT_C|CT_S, CT_C|CT_S, CT_C|CT_S, CT_C, CT_C,
+    CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C,
+    CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C, CT_C,
+    CT_S|(char)CT_B, CT_P, CT_P, CT_P, CT_P, CT_P, CT_P, CT_P,
+    CT_P, CT_P, CT_P, CT_P, CT_P, CT_P, CT_P, CT_P,
+    CT_N, CT_N, CT_N, CT_N, CT_N, CT_N, CT_N, CT_N,
+    CT_N, CT_N, CT_P, CT_P, CT_P, CT_P, CT_P, CT_P,
+    CT_P, CT_U|CT_X, CT_U|CT_X, CT_U|CT_X, CT_U|CT_X, CT_U|CT_X, CT_U|CT_X, CT_U,
+    CT_U, CT_U, CT_U, CT_U, CT_U, CT_U, CT_U, CT_U,
+    CT_U, CT_U, CT_U, CT_U, CT_U, CT_U, CT_U, CT_U,
+    CT_U, CT_U, CT_U, CT_P, CT_P, CT_P, CT_P, CT_P,
+    CT_P, CT_L|CT_X, CT_L|CT_X, CT_L|CT_X, CT_L|CT_X, CT_L|CT_X, CT_L|CT_X, CT_L,
+    CT_L, CT_L, CT_L, CT_L, CT_L, CT_L, CT_L, CT_L,
+    CT_L, CT_L, CT_L, CT_L, CT_L, CT_L, CT_L, CT_L,
+    CT_L, CT_L, CT_L, CT_P, CT_P, CT_P, CT_P, CT_C,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+};
+#undef CT_U
+#undef CT_L
+#undef CT_N
+#undef CT_S
+#undef CT_P
+#undef CT_C
+#undef CT_X
+#undef CT_B
+static const char *rudroid_bionic_ctype = ctype_table;
+_Static_assert(sizeof(ctype_table) == 257, "AOSP _ctype_ table shape");
+_Static_assert(sizeof(rudroid_bionic_ctype) == sizeof(void *), "LP64 data symbol");
+
 // The locale_t facade is C-owned, matching Android's small public-service
 // token. No native locale_t is ever interpreted as this guest object.
 static size_t locale_max(GuestLocale *l) {
@@ -109,15 +168,9 @@ static struct lconv *locale_conventions(void) {
     native_tables(false);
     return &conventions; // One stable snapshot; native localeconv cannot overwrite it.
 }
-// Android byte classification is ASCII in both supported locales. Reuse the
-// pinned native C tables, without changing the host thread's locale or reading
-// a classification table outside its unsigned-byte domain (EOF is false).
-#define BYTE_CLASS(fn, fallback) \
-    static int guest_##fn(int c) { \
-        if (c < 0 || c > 255) return 0; \
-        locale_t l = native_tables(false); \
-        return l ? (fn##_l(c, l) != 0) : (fallback); \
-    } \
+// Android byte classification is ASCII in both supported locales.
+#define BYTE_CLASS(fn, predicate) \
+    static int guest_##fn(int c) { return c >= 0 && c <= 255 && (predicate); } \
     static int guest_##fn##_l(int c, GuestLocale *l) { (void)l; return guest_##fn(c); }
 #define LOWER(c) ((c) >= 'a' && (c) <= 'z')
 #define UPPER(c) ((c) >= 'A' && (c) <= 'Z')
@@ -131,6 +184,9 @@ BYTE_CLASS(islower, LOWER(c))
 BYTE_CLASS(isupper, UPPER(c))
 BYTE_CLASS(isprint, c >= ' ' && c <= '~')
 BYTE_CLASS(isgraph, c > ' ' && c <= '~')
+BYTE_CLASS(iscntrl, c < 0x20 || c == 0x7f)
+BYTE_CLASS(ispunct, (c >= '!' && c <= '/') || (c >= ':' && c <= '@') ||
+    (c >= '[' && c <= '`') || (c >= '{' && c <= '~'))
 #undef BYTE_CLASS
 static int guest_tolower(int c) { return UPPER(c) ? c + ('a' - 'A') : c; }
 static int guest_toupper(int c) { return LOWER(c) ? c - ('a' - 'A') : c; }
@@ -202,13 +258,15 @@ static size_t guest_strftime_l(char *out, size_t n, const char *fmt, const struc
     (void)l; locale_t c = native_tables(false); return c ? strftime_l(out,n,fmt,tm,c) : strftime(out,n,fmt,tm);
 }
 static const RudroidSymbol symbols[] = {
+    RUDROID_SYMBOL("_ctype_", &rudroid_bionic_ctype)
     RUDROID_SYMBOL("newlocale", new_locale) RUDROID_SYMBOL("duplocale", duplicate_locale)
     RUDROID_SYMBOL("freelocale", free_locale) RUDROID_SYMBOL("uselocale", use_locale)
     RUDROID_SYMBOL("setlocale", set_locale) RUDROID_SYMBOL("localeconv", locale_conventions)
     RUDROID_SYMBOL("__ctype_get_mb_cur_max", mb_max)
 #define BYTE(fn) RUDROID_SYMBOL(#fn, guest_##fn) RUDROID_SYMBOL(#fn "_l", guest_##fn##_l)
     BYTE(isspace) BYTE(isalpha) BYTE(isalnum) BYTE(isdigit) BYTE(isxdigit)
-    BYTE(islower) BYTE(isupper) BYTE(isprint) BYTE(isgraph) BYTE(tolower) BYTE(toupper)
+    BYTE(islower) BYTE(isupper) BYTE(isprint) BYTE(isgraph) BYTE(iscntrl) BYTE(ispunct)
+    BYTE(tolower) BYTE(toupper)
 #undef BYTE
 #define WIDE(fn) RUDROID_SYMBOL(#fn, guest_##fn) RUDROID_SYMBOL(#fn "_l", guest_##fn##_l)
     WIDE(iswalnum) WIDE(iswalpha) WIDE(iswblank) WIDE(iswcntrl)

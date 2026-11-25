@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use rudroid_common::handles::HandleTable;
-use rudroid_common::il2cpp::{Il2cpp, Method, StaticI32Method};
+use rudroid_unity_common::il2cpp::{Il2cpp, Method, StaticI32Method};
 use rudroid_common::registry::RudroidModuleEvent;
 use rudroid_common::{package_gate, Kind, ModuleKind};
 use rudroid_common::host_api::{HostApiV0, HOST_API_VERSION};
@@ -60,7 +60,7 @@ use rudroid_host_config::HostConfig;
 use rudroid_common::arm64_detour::{self as arm64, Original};
 
 pub use arm64::HookShape;
-use rudroid_common::gamepatch_support::install_detour as detour;
+use rudroid_unity_common::gamepatch_support::install_detour as detour;
 
 mod after_title;
 mod java;
@@ -152,9 +152,17 @@ impl SilksongFeatures {
     }
 
     /// Read through the HostConfig object (in-process callers and tests).
-    pub fn from_config(config: &HostConfig) -> SilksongFeatures {
+    pub fn from_config(config: &HostConfig) -> Self {
+        Self::read(config, !config.memory_policy().unwrap_or_default().preload_audio)
+    }
+
+    pub fn from_host_api(api: &HostApiV0) -> Self {
+        Self::read(api, !api.config_bool(c"runtime.preload_audio", true))
+    }
+
+    fn read(config: &impl rudroid_common::config_reader::ConfigReader, disable_preloader: bool) -> Self {
         let flag = |key: &str, default: bool| {
-            config.get_bool(&format!("{FEATURE_PREFIX}{key}"), default)
+            config.boolean(&format!("{FEATURE_PREFIX}{key}"), default)
         };
         let disable_heavy_postprocess = flag("disable_heavy_postprocess", false);
         SilksongFeatures {
@@ -171,7 +179,7 @@ impl SilksongFeatures {
             // Reference window: 25..=100 is accepted, everything else keeps
             // the 100 default (no pruning).
             decorative_sprite_percent: match config
-                .get_i64(&format!("{FEATURE_PREFIX}decorative_sprite_percent"), 100)
+                .integer(&format!("{FEATURE_PREFIX}decorative_sprite_percent"), 100)
             {
                 value if (25..=100).contains(&value) => value,
                 _ => 100,
@@ -188,81 +196,17 @@ impl SilksongFeatures {
             resource_census: flag("resource_census", false),
             unload_unused_assets_after_prune: flag("unload_unused_assets_after_prune", false),
             unload_assetbundles_after_title: flag("unload_assetbundles_after_title", false),
-            assetbundle_unload_delay_frames: match config.get_i64(
+            assetbundle_unload_delay_frames: match config.integer(
                 &format!("{FEATURE_PREFIX}assetbundle_unload_delay_frames"),
                 600,
             ) {
                 value if (60..=6000).contains(&value) => value,
                 _ => 600,
             },
-            disable_audio_preloader: flag("disable_audio_preloader", !config.memory_policy().unwrap_or_default().preload_audio),
+            disable_audio_preloader: flag("disable_audio_preloader", disable_preloader),
             trace_resource_load_methods: flag("trace_resource_load_methods", false),
             trace_audio_clip_records: flag("trace_audio_clip_records", false),
-            viewport_enable: config.get_bool("game_patches.silksong_viewport.enable", true),
-        }
-    }
-
-    /// Read through the Host API v0 getters — the exact consumption path of
-    /// the reference `game_patch::Context` (dotted-key getters only).
-    pub fn from_host_api(api: &HostApiV0) -> SilksongFeatures {
-        fn flag(api: &HostApiV0, key: &str, default: bool) -> bool {
-            match CString::new(key) {
-                Ok(key) => api.config_bool(&key, default),
-                Err(_) => default,
-            }
-        }
-        fn number(api: &HostApiV0, key: &str, default: i64, window: std::ops::RangeInclusive<i64>) -> i64 {
-            let value = match CString::new(key) {
-                Ok(key) => api.config_i64(&key, default),
-                Err(_) => default,
-            };
-            if window.contains(&value) { value } else { default }
-        }
-        let key = |name: &str| format!("{FEATURE_PREFIX}{name}");
-        let disable_heavy_postprocess = flag(api, &key("disable_heavy_postprocess"), false);
-        SilksongFeatures {
-            suppress_application_quit: flag(api, &key("suppress_application_quit"), true),
-            skip_launcher_disclaimer: flag(api, &key("skip_launcher_disclaimer"), true),
-            skip_apkvision_signature_check: flag(api, &key("skip_apkvision_signature_check"), true),
-            load_main_menu_directly: flag(api, &key("load_main_menu_directly"), true),
-            skip_unsupported_cinematics: flag(api, &key("skip_unsupported_cinematics"), true),
-            disable_touch_camera: flag(api, &key("disable_touch_camera"), false),
-            disable_touch_controls: flag(api, &key("disable_touch_controls"), false),
-            disable_watermark_canvas: flag(api, &key("disable_watermark_canvas"), false),
-            destroy_bootstrap_objects: flag(api, &key("destroy_bootstrap_objects"), false),
-            freeze_decorative_behaviours: flag(api, &key("freeze_decorative_behaviours"), false),
-            decorative_sprite_percent: number(
-                api,
-                &key("decorative_sprite_percent"),
-                100,
-                25..=100,
-            ),
-            disable_ambient_particles: flag(api, &key("disable_ambient_particles"), false),
-            disable_heavy_postprocess,
-            disable_bloom: disable_heavy_postprocess || flag(api, &key("disable_bloom"), false),
-            disable_camera_blur_plane: disable_heavy_postprocess
-                || flag(api, &key("disable_camera_blur_plane"), false),
-            disable_light_blur: disable_heavy_postprocess || flag(api, &key("disable_light_blur"), false),
-            disable_light_blurred_background: flag(
-                api,
-                &key("disable_light_blurred_background"),
-                false,
-            ),
-            disable_uber_postprocess: disable_heavy_postprocess
-                || flag(api, &key("disable_uber_postprocess"), false),
-            resource_census: flag(api, &key("resource_census"), false),
-            unload_unused_assets_after_prune: flag(api, &key("unload_unused_assets_after_prune"), false),
-            unload_assetbundles_after_title: flag(api, &key("unload_assetbundles_after_title"), false),
-            assetbundle_unload_delay_frames: number(
-                api,
-                &key("assetbundle_unload_delay_frames"),
-                600,
-                60..=6000,
-            ),
-            disable_audio_preloader: flag(api, &key("disable_audio_preloader"), !flag(api, "runtime.preload_audio", true)),
-            trace_resource_load_methods: flag(api, &key("trace_resource_load_methods"), false),
-            trace_audio_clip_records: flag(api, &key("trace_audio_clip_records"), false),
-            viewport_enable: flag(api, "game_patches.silksong_viewport.enable", true),
+            viewport_enable: config.boolean("game_patches.silksong_viewport.enable", true),
         }
     }
 }
@@ -573,7 +517,7 @@ pub struct PlanEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Guest IL2CPP lookups over the shared `rudroid_common::il2cpp` binding.
+// Guest IL2CPP lookups over the shared `rudroid_unity_common::il2cpp` binding.
 // ---------------------------------------------------------------------------
 
 /// The reference init's REQUIRED export set (the C++ patch returns -1 when
@@ -633,7 +577,7 @@ fn method_entry(api: &Il2cpp, ns: &str, class: &str, method: &str, argc: c_int) 
 // ---------------------------------------------------------------------------
 
 /// One install outcome.
-pub use rudroid_common::gamepatch_support::InstallEvent;
+pub use rudroid_unity_common::gamepatch_support::InstallEvent;
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // Hook bodies must never panic: a poisoned lock still hands out the data.
@@ -1348,6 +1292,22 @@ extern "C" fn on_il2cpp_ready(event: Option<&RudroidModuleEvent>, user: *mut c_v
     // managed code executes the targets; patch windows keep execute permission.
     let events = unsafe { install(&api, &armed.features) };
     report_install_events(&armed, &events);
+    let result = rudroid_unity_common::managed_hooks::ManagedHookPlan::touch_controls(api)
+        .map_err(str::to_owned)
+        .and_then(|plan| {
+            // SAFETY: same post-init idle window; common validates exact setter, array and bool field metadata.
+            unsafe { rudroid_unity_common::managed_hooks::install(plan, armed.api) }
+        });
+    match result {
+        Ok(slot) => armed.api.log_line(
+            c"UI",
+            &format!("TouchManager adapter installed slot={slot}"),
+        ),
+        Err(reason) => armed.api.log_line(
+            c"UI",
+            &format!("TouchManager adapter unavailable: {reason}"),
+        ),
+    }
     if let Some(runtime) = &armed.title_unload {
         runtime.ready(api);
     }
@@ -1356,7 +1316,7 @@ extern "C" fn on_il2cpp_ready(event: Option<&RudroidModuleEvent>, user: *mut c_v
 
 extern "C" fn on_player_frame(event: Option<&RudroidModuleEvent>, user: *mut c_void) {
     let (Some(event), Some(armed)) = (event, ARMED.get(user)) else { return; };
-    if event.kind == ModuleKind::UnityStopping as u32 { launcher::stop(); cinematic::stop(); language::stop(); }
+    if event.kind == ModuleKind::UnityStopping as u32 { rudroid_unity_common::managed_hooks::stop(); launcher::stop(); cinematic::stop(); language::stop(); }
     if event.kind == ModuleKind::UnityFrame as u32 && armed.observe_scenes {
         // SAFETY: UnityFrame is emitted on the owning player thread after
         // nativeRender; observer keeps no managed objects between callbacks.

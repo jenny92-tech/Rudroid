@@ -13,7 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use rudroid_common::display_dimensions::RenderDimensions;
 use super::render_scale::RenderScale;
@@ -23,6 +23,18 @@ mod scaled_gl;
 mod shader_gl;
 #[path="texture_gl.rs"]
 mod texture_gl;
+#[cfg(feature = "diag-probes")]
+#[path = "geometry_map.rs"]
+pub(super) mod geometry_map;
+#[cfg(feature = "diag-probes")]
+#[path = "geometry_trace.rs"]
+pub(super) mod geometry_trace;
+#[cfg(feature = "diag-probes")]
+#[path = "geometry_census.rs"]
+mod geometry_census;
+#[cfg(feature = "diag-probes")]
+#[path = "geometry_alias.rs"]
+pub(super) mod geometry_alias;
 
 type Handle = *mut c_void;
 type Bool = u32;
@@ -107,7 +119,7 @@ fn fail<T>(code: i32, result: T) -> T {
         // SAFETY: eglGetError has no preconditions; it clears the native error.
         unsafe { (g.driver.error)() };
     }
-    ERROR.with(|error| error.set(code));
+    let _ = ERROR.try_with(|error| error.set(code));
     result
 }
 
@@ -170,113 +182,59 @@ pub(crate) struct Graphics {
     height: i32,
     dimensions: RenderDimensions,
     scale: Option<RenderScale>,
+    #[cfg(feature = "diag-probes")]
+    geometry_maps: Option<geometry_map::GeometryMaps>,
+    #[cfg(feature = "diag-probes")]
+    geometry_trace: Option<geometry_trace::Trace>,
     disable_invalidation: bool,
     primary_claimed: AtomicBool,
     live: AtomicBool,
+    get_integer: usize,
+    use_program: usize,
     addresses: Mutex<HashMap<Vec<u8>, usize>>,
     resources: Mutex<Resources>,
     extensions: CString,
     presented: Option<extern "C" fn()>,
+    #[cfg(feature = "diag-probes")]
+    interval_trace: Option<super::wayland_interval::Trace>,
+    #[cfg(feature = "diag-probes")]
     capture: Option<FrameCapture>,
     capture_errors: Mutex<HashMap<usize,VecDeque<u32>>>,
     swaps: AtomicU64,
+    diagnostic_records: AtomicU8,
 }
 
-/// Opt-in diagnostic readback. Normal sessions have no capture allocation or
-/// pixel readback; the environment is queried once at service activation.
-#[derive(Clone, Copy)]
-enum CapturePoint { Swap(u64), ElapsedMs(u64) }
-struct FrameCapture {
-    path: std::path::PathBuf,
-    points: Vec<CapturePoint>, // primary plus at most 16 extra captures
-    started: Option<std::time::Instant>,
-    completed: AtomicU32,
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Route {
+    ElfSource,
+    EglProc,
 }
-impl FrameCapture {
-    fn from_environment() -> Option<Self> {
-        let path = std::env::var_os("RUDROID_CAPTURE_GUEST_FRAME_PATH")?;
-        let after_ms = std::env::var("RUDROID_CAPTURE_GUEST_FRAME_AFTER_MS").ok().and_then(|s|s.parse::<u64>().ok());
-        let at = after_ms.unwrap_or_else(|| std::env::var("RUDROID_CAPTURE_GUEST_FRAME_AT").ok().and_then(|s|s.parse().ok()).unwrap_or(120));
-        let (point, extra_key): (fn(u64) -> CapturePoint, _) = if after_ms.is_some() {
-            (CapturePoint::ElapsedMs, "RUDROID_CAPTURE_GUEST_FRAME_EXTRA_AFTER_MS")
-        } else {
-            (CapturePoint::Swap, "RUDROID_CAPTURE_GUEST_FRAME_EXTRA")
-        };
-        let mut points=vec![point(at)];
-        points.extend(std::env::var(extra_key).unwrap_or_default().split(',').filter_map(|s|s.parse::<u64>().ok()).filter(|n|*n>0).take(16).map(point));
-        Some(Self { path:path.into(), points, started:after_ms.map(|_|std::time::Instant::now()), completed:AtomicU32::new(0) })
-    }
-    fn take_due(&self, swap:u64, elapsed_ms:u128)->Option<usize> {
-        self.points.iter().enumerate().find_map(|(index,point)| {
-            let due=match point { CapturePoint::Swap(at)=>swap==*at, CapturePoint::ElapsedMs(at)=>elapsed_ms>=u128::from(*at) };
-            let bit=1u32<<index;
-            (due && self.completed.fetch_or(bit, Ordering::Relaxed)&bit==0).then_some(index)
-        })
-    }
-    fn take(&self,swap:u64)->Option<usize> {
-        self.take_due(swap,self.started.map(|start|start.elapsed().as_millis()).unwrap_or(0))
-    }
-    unsafe fn read(&self, g:&Graphics) -> Option<Vec<u8>> {
-        if !g.primary_current(){return None;}
-        let version=g.resolve(c"glGetString");if version==0{return None;}
-        let version:unsafe extern "C" fn(u32)->*const c_char=std::mem::transmute(version);
-        let version=version(0x1f02);if version.is_null() || !CStr::from_ptr(version).to_bytes().starts_with(b"OpenGL ES 3"){return None;}
-        let names = [c"glGetIntegerv",c"glBindFramebuffer",c"glBindBuffer",c"glPixelStorei",c"glReadPixels",c"glReadBuffer",c"glGetError"];
-        let addresses = names.map(|name|g.resolve(name));
-        if addresses.contains(&0) {return None;}
-        let get:unsafe extern "C" fn(u32,*mut i32)=std::mem::transmute(addresses[0]);
-        let framebuffer:unsafe extern "C" fn(u32,u32)=std::mem::transmute(addresses[1]);
-        let buffer:unsafe extern "C" fn(u32,u32)=std::mem::transmute(addresses[2]);
-        let pack:unsafe extern "C" fn(u32,i32)=std::mem::transmute(addresses[3]);
-        let read:unsafe extern "C" fn(i32,i32,i32,i32,u32,u32,*mut c_void)=std::mem::transmute(addresses[4]);
-        let read_buffer:unsafe extern "C" fn(u32)=std::mem::transmute(addresses[5]);
-        // Diagnostic checks use the native entry. Replay any pre-existing
-        // error through the guest façade, keyed by context rather than thread.
-        let error_address=sdl2::sys::SDL_GL_GetProcAddress(c"glGetError".as_ptr());
-        if error_address.is_null(){return None;}
-        let error:unsafe extern "C" fn()->u32=std::mem::transmute(error_address);
-        let context=(g.driver.current_context)() as usize;
-        if g.capture_errors.lock().unwrap().contains_key(&context){return None;}
-        let prior=error();if prior!=0{g.remember_gl_error(context,prior);rudroid_common::error!("[SDL] guest capture skipped: pre-existing GL error {prior:#x}");return None;}
-        // ES3 state restoration is required: a bound pixel-pack buffer would
-        // reinterpret the CPU output pointer as a buffer offset, and row/skip
-        // parameters could otherwise write beyond the owned output allocation.
-        let mut saved=[0;6];
-        let keys=[0x8caa,0x88ed,0x0d05,0x0d02,0x0d03,0x0d04];
-        for (key,value) in keys.into_iter().zip(&mut saved){get(key,value);}
-        let Some(size)=(g.width as usize).checked_mul(g.height as usize).and_then(|n|n.checked_mul(4)) else{return None;};
-        let mut pixels=Vec::new();if pixels.try_reserve_exact(size).is_err(){return None;}pixels.resize(size,0u8);
-        framebuffer(0x8ca8,0);let mut old_read_buffer=0;get(0x0c02,&mut old_read_buffer);read_buffer(0x0405);buffer(0x88eb,0);pack(0x0d05,1);
-        for key in [0x0d02,0x0d03,0x0d04]{pack(key,0);}
-        read(0,0,g.width,g.height,0x1908,0x1401,pixels.as_mut_ptr().cast());
-        let read_error=error();read_buffer(old_read_buffer as u32);
-        framebuffer(0x8ca8,saved[0] as u32);buffer(0x88eb,saved[1] as u32);
-        for (key,value) in keys[2..].iter().zip(&saved[2..]){pack(*key,*value);}
-        let restore_error=error();if read_error!=0 || restore_error!=0 {rudroid_common::error!("[SDL] guest capture failed: read={read_error:#x} restore={restore_error:#x}");return None;}
-        Some(pixels)
-    }
-    fn write(&self,g:&Graphics,pixels:&[u8],at:u64,index:usize) {
-        use std::io::Write;
-        let result=(||->std::io::Result<()>{
-            let path=if index==0{self.path.clone()}else{
-                let suffix=match self.points[index] {CapturePoint::Swap(n)=>format!("swap-{n}"),CapturePoint::ElapsedMs(n)=>format!("ms-{n}")};
-                self.path.with_file_name(format!("{}-{suffix}.ppm",self.path.file_stem().unwrap_or_default().to_string_lossy()))
-            };
-            let mut file=std::io::BufWriter::new(std::fs::File::create(path)?);
-            write!(file,"P6\n{} {}\n255\n",g.width,g.height)?;
-            for row in (0..g.height as usize).rev(){
-                for pixel in pixels[row*g.width as usize*4..(row+1)*g.width as usize*4].chunks_exact(4){file.write_all(&pixel[..3])?;}
-            }
-            file.flush()
-        })();
-        match self.points[index] {
-            CapturePoint::Swap(_)=>eprintln!("[SDL] guest frame capture: swap={} size={}x{} result={result:?}",at,g.width,g.height),
-            CapturePoint::ElapsedMs(ms)=>eprintln!("[SDL] guest frame capture: swap={} after_ms={} elapsed_ms={} size={}x{} result={result:?}",at,ms,self.started.unwrap().elapsed().as_millis(),g.width,g.height),
-        }
-    }
-}
+
+#[cfg(feature = "diag-probes")]
+#[path = "frame_capture.rs"]
+mod frame_capture;
+#[cfg(feature = "diag-probes")]
+use frame_capture::FrameCapture;
 
 impl Graphics {
+    fn capture_enabled(&self) -> bool {
+        #[cfg(feature = "diag-probes")]
+        { self.capture.is_some() }
+        #[cfg(not(feature = "diag-probes"))]
+        { false }
+    }
+
+    // Only entry/result/ownership metadata; never query/consume an EGL error,
+    // inspect guest memory or hold a resources lock across the log callback.
+    // Separate from first-present evidence: an EGL entry is not a game frame.
+    fn trace_egl(&self, message: impl FnOnce() -> String) {
+        if rudroid_common::logging::diagnostics_enabled()
+            && self.diagnostic_records.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                |n| (n < 96).then_some(n + 1)).is_ok()
+        {
+            rudroid_common::diagnostic!("[SDL] guest EGL phase: {} thread={:?}", message(), std::thread::current().id());
+        }
+    }
     /// # Safety
     /// Run on the SDL creating thread with its primary context current. The
     /// SDL session must outlive this service and all resolved-function uses.
@@ -285,6 +243,7 @@ impl Graphics {
     pub(crate) unsafe fn activate(
         presented: Option<extern "C" fn()>,
         render: Option<RenderDimensions>,
+        _native_wayland_buffer: bool,
     ) -> Result<Arc<Self>, String> {
         if ACTIVE
             .lock()
@@ -381,6 +340,14 @@ impl Graphics {
         rudroid_common::diagnostic!("[SDL] render geometry: output={}x{} guest={}x{} scaled={} sharp={}",width,height,dimensions.width,dimensions.height,dimensions.scaled(),dimensions.sharp);
         let disable_invalidation = super::invalidate_policy::configured();
         rudroid_common::diagnostic!("[SDL] framebuffer invalidation policy: disabled={disable_invalidation}");
+        #[cfg(feature = "diag-probes")]
+        let native_gl = |name: &CStr| {
+            // SAFETY: the verified primary GLES context is current at activation;
+            // names are NUL-terminated and only driver functions are resolved.
+            unsafe { sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as usize }
+        };
+        #[cfg(feature = "diag-probes")]
+        let geometry_maps = geometry_map::GeometryMaps::configured(native_gl);
         let graphics = Arc::new(Self {
             driver,
             window: window as usize,
@@ -392,16 +359,26 @@ impl Graphics {
             height: dimensions.height,
             dimensions,
             scale,
+            #[cfg(feature = "diag-probes")]
+            geometry_maps,
+            #[cfg(feature = "diag-probes")]
+            geometry_trace: geometry_trace::Trace::configured(native_gl),
             disable_invalidation,
             primary_claimed: AtomicBool::new(false),
             live: AtomicBool::new(true),
+            get_integer: driver_address(c"glGetIntegerv"),
+            use_program: driver_address(c"glUseProgram"),
             addresses: Mutex::new(HashMap::new()),
             resources: Mutex::new(Resources::default()),
             extensions: CString::new(extensions).unwrap(),
             presented,
+            #[cfg(feature = "diag-probes")]
+            interval_trace: super::wayland_interval::Trace::for_native_wayland(_native_wayland_buffer),
+            #[cfg(feature = "diag-probes")]
             capture: FrameCapture::from_environment(),
             capture_errors: Mutex::new(HashMap::new()),
             swaps: AtomicU64::new(0),
+            diagnostic_records: AtomicU8::new(0),
         });
         // SAFETY: creating thread, primary context current, driver and window live.
         unsafe { capture_gles_extensions(&graphics) }?;
@@ -497,17 +474,15 @@ impl Graphics {
         self.primary_current().then_some(scale)
     }
 
+    #[cfg(test)]
     fn resolve(&self, name: &CStr) -> usize {
+        self.resolve_from(name, Route::ElfSource)
+    }
+
+    fn resolve_from(&self, name: &CStr, route: Route) -> usize {
         let bytes = name.to_bytes();
-        match bytes {
-            b"ANativeWindow_fromSurface" => return native_window_from_surface as usize,
-            b"ANativeWindow_acquire" => return native_window_acquire as usize,
-            b"ANativeWindow_release" => return native_window_release as usize,
-            b"ANativeWindow_getWidth" => return native_window_width as usize,
-            b"ANativeWindow_getHeight" => return native_window_height as usize,
-            b"ANativeWindow_setBuffersGeometry" => return native_window_geometry as usize,
-            b"eglQueryContext" => return self.driver.query_context as usize,
-            _ => {}
+        if bytes.starts_with(b"ANativeWindow_") {
+            return super::native_window::resolve::<Self>(bytes);
         }
         let egl = egl_link_symbol(name);
         if egl != 0 { return egl; }
@@ -516,6 +491,16 @@ impl Graphics {
         } else {
             name
         };
+        let address = self.resolve_gl(canonical);
+        #[cfg(feature = "diag-probes")]
+        if let Some(trace) = &self.geometry_trace {
+            return trace.resolve(canonical.to_bytes(), route, address);
+        }
+        let _ = route;
+        address
+    }
+
+    fn resolve_gl(&self, canonical: &CStr) -> usize {
         let key = canonical.to_bytes();
         let hint = super::invalidate_policy::symbol(self.disable_invalidation, key);
         if hint != 0 { return hint; }
@@ -530,19 +515,31 @@ impl Graphics {
                 _=>{},
             }
         }
+        #[cfg(feature = "diag-probes")]
+        if let Some(geometry_maps) = &self.geometry_maps {
+            let wrapper = geometry_maps.symbol(key);
+            if wrapper != 0 {
+                return wrapper;
+            }
+        }
         let texture=texture_gl::symbol(key);if texture!=0{return texture;}
         let shader=shader_gl::symbol(key);if shader!=0{return shader;}
         if self.scale.is_some() {
             let wrapper=scaled_gl::symbol(key);
             if wrapper!=0 {return wrapper;}
         }
-        if key==b"glGetError" && (self.capture.is_some() || super::texture_policy::enabled()){return captured_gl_error as usize;}
+        if key==b"glGetError" && (self.capture_enabled() || super::texture_policy::enabled()){return captured_gl_error as usize;}
         self.native_address(canonical)
     }
 
     // Resolve the pinned native driver entry without reentering guest wrappers.
     fn native_address(&self, canonical:&CStr)->usize {
         let key=canonical.to_bytes();
+        match key {
+            b"glGetIntegerv" if self.get_integer != 0 => return self.get_integer,
+            b"glUseProgram" if self.use_program != 0 => return self.use_program,
+            _ => {}
+        }
         let gl = key.starts_with(b"gl") && key.get(2).is_some_and(u8::is_ascii_uppercase);
         let egl = matches!(
             key,
@@ -551,7 +548,6 @@ impl Graphics {
                 | b"eglWaitGL"
                 | b"eglWaitNative"
                 | b"eglWaitClient"
-                | b"eglSurfaceAttrib"
                 | b"eglBindTexImage"
                 | b"eglReleaseTexImage"
                 | b"eglSignalSyncKHR"
@@ -576,8 +572,7 @@ impl Graphics {
             return address;
         }
         // No cache lock crosses a driver call. Misses are not retained.
-        // SAFETY: NUL-terminated name; SDL video stays up while the service is live.
-        let address = unsafe { sdl2::sys::SDL_GL_GetProcAddress(canonical.as_ptr()) } as usize;
+        let address = driver_address(canonical);
         if address != 0 {
             let mut cache = self.addresses.lock().unwrap_or_else(|p| p.into_inner());
             if cache.len() < CACHE_LIMIT {
@@ -586,6 +581,12 @@ impl Graphics {
         }
         address
     }
+}
+
+/// Called during graphics activation or while resolving a live guest entry.
+fn driver_address(name: &CStr) -> usize {
+    // SAFETY: name is terminated and SDL video is initialized by the active session.
+    unsafe { sdl2::sys::SDL_GL_GetProcAddress(name.as_ptr()) as usize }
 }
 
 /// # Safety
@@ -622,7 +623,11 @@ unsafe extern "C" fn identity_integer(name:u32,out:*mut i32) {
     unsafe {
         if !out.is_null() && !(g.driver.current_context)().is_null() {
             if let Some(value)=super::gles_identity::integer(name) {*out=value;return;}
-            if let Some(value)=super::gles_policy::integer(name) {*out=value;return;}
+            match super::gles_policy::integer(name) {
+                Some(super::gles_policy::IntegerOverride::Scalar(value)) => {*out=value;return;}
+                Some(super::gles_policy::IntegerOverride::NoWrite) => return,
+                None => {}
+            }
         }
         let scaled=if g.scale.is_some(){scaled_gl::symbol(b"glGetIntegerv")}else{0};
         let address=if scaled!=0 {scaled}else{g.native_address(c"glGetIntegerv")};
@@ -678,7 +683,12 @@ unsafe extern "C" fn identity_integer64(name:u32,out:*mut i64) {
     // SAFETY: overridden queries are scalar; vector queries preserve native/scaled element counts.
     unsafe {
         if !out.is_null() && !(g.driver.current_context)().is_null() {
-            if let Some(value)=super::gles_identity::integer(name).or_else(||super::gles_policy::integer(name)) {*out=i64::from(value);return;}
+            if let Some(value)=super::gles_identity::integer(name) {*out=i64::from(value);return;}
+            match super::gles_policy::integer(name) {
+                Some(super::gles_policy::IntegerOverride::Scalar(value)) => {*out=i64::from(value);return;}
+                Some(super::gles_policy::IntegerOverride::NoWrite) => return,
+                None => {}
+            }
         }
         let scaled=if g.scale.is_some(){scaled_gl::symbol(b"glGetInteger64v")}else{0};
         let addr=if scaled!=0{scaled}else{g.native_address(c"glGetInteger64v")};if addr==0{return;}
@@ -692,7 +702,16 @@ unsafe extern "C" fn program_binary(program:u32,format:u32,binary:*const c_void,
     let Some(g)=active() else{return;};
     let addr=g.native_address(c"glProgramBinary");let addr=if addr!=0{addr}else{g.native_address(c"glProgramBinaryOES")};if addr==0{return;}
     // SAFETY: exact GLES core/OES ABI; caller supplies current context and readable binary.
-    unsafe {let call:unsafe extern "C" fn(u32,u32,*const c_void,i32)=std::mem::transmute(addr);let change=super::shader_policy::policy().skip.then(shader_gl::begin_change);call(program,format,binary,length);if super::shader_policy::policy().skip{shader_gl::program_binary_loaded(&g,program);}drop(change);if super::shader_policy::policy().skip{shader_gl::refresh_binding(&g,Some(program));}}
+    unsafe {
+        let call: unsafe extern "C" fn(u32, u32, *const c_void, i32) = std::mem::transmute(addr);
+        let track_skip = super::shader_policy::policy().enabled() && super::shader_policy::policy().skip;
+        let change = track_skip.then(shader_gl::begin_change);
+        call(program, format, binary, length);
+        if track_skip {
+            shader_gl::program_binary_loaded(&g, program);
+        }
+        drop(change);
+    }
 }
 /// # Safety
 /// Non-null length/format are writable scalars; native mode additionally requires buffer_size writable bytes.
@@ -738,8 +757,15 @@ pub(crate) fn egl_link_symbol(name: &CStr) -> usize {
         b"eglTerminate" => terminate as usize,
         b"eglPresentationTimeANDROID" => presentation_time as usize,
         b"eglSurfaceAttrib" => surface_attrib as usize,
+        b"eglQueryContext" => query_context as usize,
         _ => 0,
     }
+}
+unsafe extern "C" fn query_context(display: Handle, context: Handle, attribute: i32, value: *mut i32) -> Bool {
+    let Some(g) = active() else { return fail(NOT_INITIALIZED, FALSE); };
+    if !g.display_ok(display) { return FALSE; }
+    // SAFETY: exact EGL ABI, validated display; native EGL validates context/attribute/output.
+    unsafe { (g.driver.query_context)(display, context, attribute, value) }
 }
 unsafe extern "C" fn surface_attrib(display: Handle, surface: Handle, attribute: i32, value: i32) -> Bool {
     let Some(g) = active() else { return fail(NOT_INITIALIZED, FALSE); };
@@ -758,16 +784,18 @@ pub unsafe extern "C" fn rudroid_sdl_guest_symbol(name: *const c_char, _user: Ha
     if name.is_null() {
         return 0;
     }
+    // SAFETY: the source caller lends a readable NUL-terminated name.
+    let name = unsafe { CStr::from_ptr(name) };
+    resolve_guest_symbol(name, Route::ElfSource)
+}
+
+fn resolve_guest_symbol(name: &CStr, route: Route) -> usize {
     #[cfg(feature = "vulkan")]
     {
-        // SAFETY: the native source caller lends a readable NUL-terminated name.
-        let result = super::vulkan::resolve(unsafe { CStr::from_ptr(name) });
+        let result = super::vulkan::resolve(name);
         if result != 0 { return result; }
     }
-    active().map_or(0, |graphics| {
-        // SAFETY: non-null and NUL-terminated per this fn's contract.
-        graphics.resolve(unsafe { CStr::from_ptr(name) })
-    })
+    active().map_or(0, |graphics| graphics.resolve_from(name, route))
 }
 
 unsafe extern "C" fn get_display(_native: Handle) -> Handle {
@@ -847,6 +875,7 @@ unsafe extern "C" fn create_window_surface(
     let Some(g) = active() else {
         return fail(NOT_INITIALIZED, std::ptr::null_mut());
     };
+    g.trace_egl(|| "create-window-surface begin".into());
     if !g.display_ok(display) {
         return std::ptr::null_mut();
     }
@@ -856,49 +885,20 @@ unsafe extern "C" fn create_window_surface(
     g.surface as Handle
 }
 
-/// The host has one primary SDL window. Surface objects alias it without
-/// retaining a borrowed JNI local reference. Each returned handle is exactly
-/// one owned Arc reference to this SAME service; acquire/release clone/drop
-/// that reference without a wrapper allocation or a second registry.
-/// Native SDL resources still require quiescent shutdown on their creator.
-unsafe extern "C" fn native_window_from_surface(_env: Handle, surface: Handle) -> Handle {
-    if surface.is_null() { return std::ptr::null_mut(); }
-    active().map_or(std::ptr::null_mut(), |graphics| Arc::into_raw(graphics) as Handle)
+impl super::native_window::Backend for Graphics {
+    const FORMAT: Option<i32> = None;
+    const NULL_WINDOW: i32 = -22;
+    const INVALID_GEOMETRY: i32 = -22;
+    fn active() -> Option<Arc<Self>> { active() }
+    fn size(&self) -> (i32, i32) { (self.width, self.height) }
+    fn trace_surface(&self, present: bool) {
+        self.trace_egl(|| format!("fromSurface surface_present={present}"));
+    }
+    fn trace_geometry(&self, width: i32, height: i32, format: i32, result: i32) {
+        self.trace_egl(|| format!("native-window geometry width={width} height={height} format={format} returned={result}"));
+    }
 }
-/// Caller holds a live reference created here, excluding concurrent last release.
-unsafe extern "C" fn native_window_acquire(window: Handle) {
-    // SAFETY: the caller holds a live reference created by fromSurface/acquire.
-    if !window.is_null() { unsafe { Arc::increment_strong_count(window.cast::<Graphics>()) }; }
-}
-/// Exactly one release for each fromSurface/acquire; never C free or another backend.
-unsafe extern "C" fn native_window_release(window: Handle) {
-    // SAFETY: releases exactly one reference the caller owns.
-    if !window.is_null() { unsafe { Arc::decrement_strong_count(window.cast::<Graphics>()) }; }
-}
-/// Borrowed handle is pinned by a caller-owned reference throughout the call.
-unsafe fn window_size(window: Handle) -> Result<(i32, i32), i32> {
-    // SAFETY: null or pinned by a caller-owned reference (see above).
-    let Some(graphics) = (unsafe { window.cast::<Graphics>().as_ref() }) else { return Err(-22); };
-    if !graphics.live.load(Ordering::Acquire) { return Err(-19); }
-    Ok((graphics.width, graphics.height))
-}
-unsafe extern "C" fn native_window_width(window: Handle) -> i32 {
-    // SAFETY: forwarded caller contract.
-    unsafe { window_size(window) }.map_or_else(|error| error, |size| size.0)
-}
-unsafe extern "C" fn native_window_height(window: Handle) -> i32 {
-    // SAFETY: forwarded caller contract.
-    unsafe { window_size(window) }.map_or_else(|error| error, |size| size.1)
-}
-unsafe extern "C" fn native_window_geometry(window: Handle, width: i32, height: i32, format: i32) -> i32 {
-    // SAFETY: forwarded caller contract.
-    let size = match unsafe { window_size(window) } { Ok(size) => size, Err(error) => return error };
-    if width < 0 || height < 0 || (width == 0) != (height == 0) || format < 0 { return -22; }
-    // Only requests that preserve the fixed native surface are implemented.
-    // Pixel-format changes and buffer scaling require an actual host backend.
-    if format != 0 || (width != 0 && (width != size.0 || height != size.1)) { return -95; }
-    0
-}
+
 unsafe extern "C" fn create_context(
     display: Handle,
     config: Handle,
@@ -908,6 +908,7 @@ unsafe extern "C" fn create_context(
     let Some(g) = active() else {
         return fail(NOT_INITIALIZED, std::ptr::null_mut());
     };
+    g.trace_egl(|| format!("create-context begin share_present={}", !share.is_null()));
     if !g.display_ok(display) {
         return std::ptr::null_mut();
     }
@@ -915,10 +916,16 @@ unsafe extern "C" fn create_context(
         return fail(BAD_CONFIG, std::ptr::null_mut());
     }
     if share.is_null() && !g.primary_claimed.swap(true, Ordering::AcqRel) {
+        g.trace_egl(|| "create-context returned primary".into());
         return g.context as Handle;
+    }
+    #[cfg(feature = "diag-probes")]
+    if !share.is_null() && g.geometry_trace.as_ref().is_some_and(|trace| !trace.before_shared_context(&g)) {
+        return fail(BAD_MATCH, std::ptr::null_mut());
     }
     // SAFETY: validated display/config; `share`/`attrs` forwarded under the EGL contract.
     let context = unsafe { (g.driver.create_context)(display, config, share, attrs) };
+    g.trace_egl(|| format!("create-context native returned success={}", !context.is_null()));
     if !context.is_null() {
         g.resources
             .lock()
@@ -1004,6 +1011,8 @@ unsafe extern "C" fn make_current(
     let Some(g) = active() else {
         return fail(NOT_INITIALIZED, FALSE);
     };
+    g.trace_egl(|| format!("make-current begin primary_context={} primary_surface={} release={}",
+        context as usize == g.context, draw as usize == g.surface && read as usize == g.surface, context.is_null()));
     if !g.display_ok(display) {
         return FALSE;
     }
@@ -1036,7 +1045,7 @@ unsafe extern "C" fn make_current(
                     // A rejected worker bind must preserve the old current
                     // window/context as well as its original EGL error.
                     if sdl2::sys::SDL_GL_MakeCurrent(previous_window, previous_context)==0 {
-                        ERROR.with(|slot|slot.set(error));
+                        let _ = ERROR.try_with(|slot|slot.set(error));
                     }
                 }
                 result
@@ -1052,6 +1061,7 @@ unsafe extern "C" fn make_current(
         }
     }
     if result==TRUE && previous!=context as usize && g.resources.lock().unwrap().retired_contexts.remove(&previous){shader_gl::forget_context(previous);g.capture_errors.lock().unwrap().remove(&previous);}
+    g.trace_egl(|| format!("make-current returned success={}", result == TRUE));
     result
 }
 unsafe extern "C" fn current_display() -> Handle {
@@ -1117,10 +1127,12 @@ unsafe extern "C" fn swap(display: Handle, surface: Handle) -> Bool {
     let Some(g) = active() else {
         return fail(NOT_INITIALIZED, FALSE);
     };
+    g.trace_egl(|| format!("swap begin primary_surface={}", surface as usize == g.surface));
     if !g.display_ok(display) {
         return FALSE;
     }
     // SAFETY: `read` checks its surface/context is current before any GL call.
+    #[cfg(feature = "diag-probes")]
     let captured=if surface as usize==g.surface {
         g.capture.as_ref().and_then(|c|c.take(g.swaps.load(Ordering::Relaxed)+1).and_then(|index|unsafe{c.read(&g)}.map(|pixels|(index,pixels))))
     }else{None};
@@ -1138,6 +1150,17 @@ unsafe extern "C" fn swap(display: Handle, surface: Handle) -> Bool {
             if sdl2::sys::SDL_GL_GetCurrentWindow() as usize!=g.window {
                 fail(BAD_CURRENT_SURFACE, FALSE)
             } else {
+                #[cfg(feature = "diag-probes")]
+                if let Some(trace) = &g.interval_trace {
+                    if g.primary_current() {
+                        trace.measure_swap(|| sdl2::sys::SDL_GL_SwapWindow(g.window as *mut _));
+                    } else {
+                        sdl2::sys::SDL_GL_SwapWindow(g.window as *mut _);
+                    }
+                } else {
+                    sdl2::sys::SDL_GL_SwapWindow(g.window as *mut _);
+                }
+                #[cfg(not(feature = "diag-probes"))]
                 sdl2::sys::SDL_GL_SwapWindow(g.window as *mut _);
                 TRUE
             }
@@ -1147,7 +1170,12 @@ unsafe extern "C" fn swap(display: Handle, surface: Handle) -> Bool {
     };
     if result == TRUE && surface as usize == g.surface {
         let swaps=g.swaps.fetch_add(1, Ordering::Relaxed)+1;
-        if swaps == 1 { super::render_thread::first_present(); }
+        if swaps == 1 {
+            super::render_thread::first_present();
+            rudroid_common::diagnostic!("[SDL] first guest EGL present: primary_context_current={} capture_requested={}",
+                g.primary_current(),g.capture_enabled());
+        }
+        #[cfg(feature = "diag-probes")]
         if let (Some(capture),Some((index,pixels)))=(&g.capture,captured){capture.write(&g,&pixels,swaps,index);}
         if let Some(presented) = g.presented {
             presented();
@@ -1171,11 +1199,38 @@ unsafe extern "C" fn interval(display: Handle, value: i32) -> Bool {
     if !g.display_ok(display) {
         return FALSE;
     }
-    // SAFETY: validated display.
-    unsafe { (g.driver.interval)(display, value) }
+    // SAFETY: both arms first validate the original request through the
+    // owning EGL driver. SDL is only called from the current primary
+    // window context, and no diagnostic call consumes eglGetError.
+    unsafe {
+        #[cfg(feature = "diag-probes")]
+        if let Some(trace) = g.interval_trace.as_ref().filter(|_| {
+            g.primary_current() && (g.driver.current_display)() == display
+        }) {
+            let before = sdl2::sys::SDL_GL_GetSwapInterval();
+            let result = (g.driver.interval)(display, value);
+            let routed = result == TRUE && matches!(value, 0 | 1) && trace.routes_to_sdl();
+            let status = routed.then(|| sdl2::sys::SDL_GL_SetSwapInterval(value));
+            let after = sdl2::sys::SDL_GL_GetSwapInterval();
+            trace.interval(value, before, result == TRUE, status, after);
+            return result;
+        }
+        (g.driver.interval)(display, value)
+    }
+}
+
+#[cfg(feature = "diag-probes")]
+pub(super) fn report_wayland_interval() -> std::io::Result<()> {
+    if let Some(g) = active() {
+        #[cfg(feature = "diag-probes")]
+        if let Some(trace) = &g.interval_trace {
+            return trace.report();
+        }
+    }
+    Ok(())
 }
 unsafe extern "C" fn get_error() -> i32 {
-    let custom = ERROR.with(|error| error.replace(SUCCESS));
+    let custom = ERROR.try_with(|error| error.replace(SUCCESS)).unwrap_or(SUCCESS);
     // SAFETY: eglGetError has no preconditions.
     let native = active().map_or(SUCCESS, |g| unsafe { (g.driver.error)() });
     if native != SUCCESS {
@@ -1193,8 +1248,14 @@ unsafe extern "C" fn captured_gl_error()->u32 {
     if address==0{return 0;}let error:unsafe extern "C" fn()->u32=std::mem::transmute(address);error()
 }
 unsafe extern "C" fn get_proc_address(name: *const c_char) -> Handle {
-    // SAFETY: forwarded caller contract (null or NUL-terminated name).
-    (unsafe { rudroid_sdl_guest_symbol(name, std::ptr::null_mut()) }) as Handle
+    if name.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the EGL caller lends a readable NUL-terminated name.
+    let name = unsafe { CStr::from_ptr(name) };
+    // Scope eglGetProcAddress to the active GLES/EGL session only; never expose
+    // Vulkan or NDK symbols through EGL extension lookup.
+    active().map_or(0, |graphics| graphics.resolve_from(name, Route::EglProc)) as Handle
 }
 unsafe extern "C" fn release_thread() -> Bool {
     // SAFETY: eglReleaseThread has no preconditions.
@@ -1205,11 +1266,11 @@ unsafe extern "C" fn release_thread() -> Bool {
                 sdl2::sys::SDL_GL_MakeCurrent(std::ptr::null_mut(),std::ptr::null_mut());
             }
             let result=(g.driver.release_thread)();
-            if result==TRUE && g.resources.lock().unwrap().retired_contexts.remove(&previous){shader_gl::forget_context(previous);g.capture_errors.lock().unwrap().remove(&previous);}
+            if result==TRUE && g.resources.lock().unwrap_or_else(|p|p.into_inner()).retired_contexts.remove(&previous){shader_gl::forget_context(previous);g.capture_errors.lock().unwrap_or_else(|p|p.into_inner()).remove(&previous);}
             result}
     });
     let _ = CACHED.try_with(|slot| *slot.borrow_mut() = (0, Weak::new()));
-    ERROR.with(|error| error.set(SUCCESS));
+    let _ = ERROR.try_with(|error| error.set(SUCCESS));
     result
 }
 unsafe extern "C" fn terminate(display: Handle) -> Bool {

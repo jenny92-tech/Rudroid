@@ -26,8 +26,11 @@ def freeze(source, cache):
     cache = Path(cache)
     cache.mkdir(parents=True, exist_ok=True)
     dest = cache / (digest + ".profdata")
-    if dest.exists():
-        if dest.stat().st_size != len(data) or hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+    if dest.exists() or dest.is_symlink():
+        st = dest.lstat()
+        if dest.is_symlink() or not stat.S_ISREG(st.st_mode):
+            raise ValueError("existing PGO snapshot must be a regular non-symlink file")
+        if st.st_size != len(data) or hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
             raise ValueError("existing PGO snapshot has different bytes")
         return digest
     fd, name = tempfile.mkstemp(prefix=".pgo-", dir=cache)
@@ -35,6 +38,7 @@ def freeze(source, cache):
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
             stream.flush()
+            os.fsync(stream.fileno())
             os.fchmod(stream.fileno(), 0o444)
         os.replace(name, dest)
     finally:

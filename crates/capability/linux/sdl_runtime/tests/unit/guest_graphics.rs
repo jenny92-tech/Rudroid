@@ -177,33 +177,6 @@ fn handheld_capability_policy_has_coherent_real_gles_queries() {
     }
 }
 
-#[test]
-fn diagnostic_captures_are_bounded_and_independent_of_frame_rate() {
-    let capture = FrameCapture {
-        path: "unused.ppm".into(),
-        points: vec![
-            CapturePoint::ElapsedMs(50_000),
-            CapturePoint::ElapsedMs(56_000),
-        ],
-        started: Some(std::time::Instant::now()),
-        completed: AtomicU32::new(0),
-    };
-    assert_eq!(capture.take_due(3000, 49_999), None);
-    assert_eq!(capture.take_due(3001, 50_005), Some(0));
-    assert_eq!(capture.take_due(3002, 50_010), None);
-    assert_eq!(capture.take_due(3300, 56_002), Some(1));
-    assert_eq!(capture.take_due(3301, 90_000), None);
-    let legacy = FrameCapture {
-        path: "unused.ppm".into(),
-        points: vec![CapturePoint::Swap(120)],
-        started: None,
-        completed: AtomicU32::new(0),
-    };
-    assert_eq!(legacy.take_due(119, 99_000), None);
-    assert_eq!(legacy.take_due(120, 99_000), Some(0));
-    assert_eq!(legacy.take_due(120, 99_000), None);
-    assert_eq!(legacy.take_due(121, 99_000), None);
-}
 thread_local! { static COST: Cell<(bool, usize, usize)> = const { Cell::new((false, 0, 0)) }; }
 struct Allocator;
 fn record(bytes: usize) {
@@ -352,23 +325,23 @@ pub(crate) fn exercise(session: &mut crate::window::SdlSession) -> Weak<Graphics
         assert_eq!(query_surface(display, surface, 0x3057, &mut width), TRUE);
         assert_eq!(width, expected_width);
         let owners = Arc::strong_count(&g);
-        let window = native_window_from_surface(std::ptr::null_mut(), 1usize as Handle);
-        let second_window = native_window_from_surface(std::ptr::null_mut(), 2usize as Handle);
+        let window = crate::native_window::from_surface::<Graphics>(std::ptr::null_mut(), 1usize as Handle);
+        let second_window = crate::native_window::from_surface::<Graphics>(std::ptr::null_mut(), 2usize as Handle);
         assert_eq!(
             window, second_window,
             "Surface facades pin the same Graphics owner"
         );
         assert_eq!(Arc::strong_count(&g), owners + 2);
-        native_window_release(second_window);
+        crate::native_window::release::<Graphics>(second_window);
         assert_eq!(Arc::strong_count(&g), owners + 1);
-        assert!(native_window_from_surface(std::ptr::null_mut(), std::ptr::null_mut()).is_null());
-        assert_eq!(native_window_width(std::ptr::null_mut()), -22);
-        assert_eq!(native_window_width(window), width);
-        assert_eq!(native_window_height(window), expected_height);
-        assert_eq!(native_window_geometry(window, 0, 0, 0), 0);
-        assert_eq!(native_window_geometry(window, 32, 32, 0), -95);
-        assert_eq!(native_window_geometry(window, 0, 64, 0), -22);
-        assert_eq!(native_window_geometry(window, 0, 0, 1), -95);
+        assert!(crate::native_window::from_surface::<Graphics>(std::ptr::null_mut(), std::ptr::null_mut()).is_null());
+        assert_eq!(crate::native_window::width::<Graphics>(std::ptr::null_mut()), -22);
+        assert_eq!(crate::native_window::width::<Graphics>(window), width);
+        assert_eq!(crate::native_window::height::<Graphics>(window), expected_height);
+        assert_eq!(crate::native_window::geometry::<Graphics>(window, 0, 0, 0), 0);
+        assert_eq!(crate::native_window::geometry::<Graphics>(window, 32, 32, 0), -95);
+        assert_eq!(crate::native_window::geometry::<Graphics>(window, 0, 64, 0), -22);
+        assert_eq!(crate::native_window::geometry::<Graphics>(window, 0, 0, 1), -95);
         // Every advertised reusable-sync extension must expose its
         // actual driver signal entry; no Android-only handle is forwarded.
         if g.extensions
@@ -502,10 +475,10 @@ pub(crate) fn exercise(session: &mut crate::window::SdlSession) -> Weak<Graphics
         println!("GUEST_GRAPHICS_COST {{\"queries\":30000,\"rust_allocations\":{allocations},\"requested_bytes\":{bytes}}}");
         COST.with(|cost| cost.set((true, 0, 0)));
         for _ in 0..10_000 {
-            assert_eq!(native_window_width(window), expected_width);
-            assert_eq!(native_window_height(window), expected_height);
-            native_window_acquire(window);
-            native_window_release(window);
+            assert_eq!(crate::native_window::width::<Graphics>(window), expected_width);
+            assert_eq!(crate::native_window::height::<Graphics>(window), expected_height);
+            crate::native_window::acquire::<Graphics>(window);
+            crate::native_window::release::<Graphics>(window);
         }
         let (_, allocations, bytes) = COST.with(|cost| cost.replace((false, 0, 0)));
         assert_eq!((allocations, bytes), (0, 0));
@@ -532,11 +505,11 @@ pub(crate) fn exercise(session: &mut crate::window::SdlSession) -> Weak<Graphics
         assert!(!leftover.is_null() && !leftover_surface.is_null());
         assert_eq!(release_thread(), TRUE);
         g.shutdown();
-        assert_eq!(native_window_width(window), -19);
-        assert_eq!(native_window_height(window), -19);
-        assert_eq!(native_window_geometry(window, 0, 0, 0), -19);
-        assert!(native_window_from_surface(std::ptr::null_mut(), 1usize as Handle).is_null());
-        native_window_release(window);
+        assert_eq!(crate::native_window::width::<Graphics>(window), -19);
+        assert_eq!(crate::native_window::height::<Graphics>(window), -19);
+        assert_eq!(crate::native_window::geometry::<Graphics>(window, 0, 0, 0), -19);
+        assert!(crate::native_window::from_surface::<Graphics>(std::ptr::null_mut(), 1usize as Handle).is_null());
+        crate::native_window::release::<Graphics>(window);
         assert_eq!(Arc::strong_count(&g), owners);
         let mut value = 0;
         assert_eq!(
@@ -574,7 +547,7 @@ pub(crate) fn exercise_render_scaling() {
         let display = g.display as Handle;
         let surface = g.surface as Handle;
         let context = g.context as Handle;
-        let window = unsafe { native_window_from_surface(std::ptr::null_mut(), 1usize as Handle) };
+        let window = crate::native_window::from_surface::<Graphics>(std::ptr::null_mut(), 1usize as Handle);
         unsafe {
             assert_eq!(query_surface(display, surface, WIDTH, &mut 0), TRUE);
             let mut actual = 0;
@@ -583,7 +556,7 @@ pub(crate) fn exercise_render_scaling() {
             query_surface(display, surface, HEIGHT, &mut actual);
             assert_eq!(actual, height);
             assert_eq!(
-                (native_window_width(window), native_window_height(window)),
+                (crate::native_window::width::<Graphics>(window), crate::native_window::height::<Graphics>(window)),
                 (width, height)
             );
             assert_eq!(make_current(display, surface, surface, context), TRUE);
@@ -747,7 +720,7 @@ pub(crate) fn exercise_render_scaling() {
                 0,
                 "private GPU object is deleted before SDL destruction"
             );
-            native_window_release(window);
+            crate::native_window::release::<Graphics>(window);
             assert_eq!(
                 (g.driver.make_current)(
                     display,

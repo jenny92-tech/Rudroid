@@ -19,6 +19,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 use android_elf_load::fixture::{
     build_minimal_aarch64_so, build_versioned_aarch64_so, VersionMode,
 };
+use android_elf_load::hash::sysv_hash;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 static FINALIZED: AtomicU32 = AtomicU32::new(0);
@@ -141,7 +142,7 @@ impl SourceGuard {
         let id = unsafe {
             android_elf_load::rudroid_elf_symbol_source_register(
                 c"rudroid_import".as_ptr(),
-                supply_import,
+                Some(supply_import),
                 std::ptr::null_mut(),
             )
         };
@@ -200,12 +201,16 @@ fn wrong_version_or_library_cannot_fall_back_to_a_name_source() {
     ] {
         let mut image = build_versioned_aarch64_so(VersionMode::Strong);
         image[offset..offset + replacement.len()].copy_from_slice(replacement);
+        if offset == 576 {
+            image[620..624].copy_from_slice(&sysv_hash("TESTVER_2.0").to_le_bytes());
+        }
         let path = write_fixture("ver-mismatch", &image);
         assert!(
             load(&path).is_null(),
             "a name hit must not override a mismatched ABI"
         );
-        assert!(last_error().contains("refusing to bind by bare name"));
+        let error = last_error();
+        assert!(error.contains("refusing to bind by bare name"), "{error}");
         assert!(file_unmapped(&path));
         std::fs::remove_file(path).unwrap();
     }

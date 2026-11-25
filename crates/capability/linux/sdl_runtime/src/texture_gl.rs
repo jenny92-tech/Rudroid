@@ -2,6 +2,7 @@
 //! OUTPUT:  texture allocation/upload facades, PBO read leases and scoped metadata cleanup
 //! POS:    sole native texture boundary; no pointers retained after synchronous driver calls
 // SPDX-License-Identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
+#![deny(unsafe_op_in_unsafe_fn)]
 use super::super::{
     texture_policy::{self as policy, Layout, Param, Plan, Unpack},
     texture_state::State,
@@ -15,34 +16,34 @@ use std::{
 
 const TEX: u32 = 0x0de1;
 const PBO: u32 = 0x88ec;
-type Image = extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
-type Sub = extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
-type Storage = extern "C" fn(u32, i32, u32, i32, i32);
-type Compressed = extern "C" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void);
-type CompressedSub = extern "C" fn(u32, i32, i32, i32, i32, i32, u32, i32, *const c_void);
+type Image = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+type Sub = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
+type Storage = unsafe extern "C" fn(u32, i32, u32, i32, i32);
+type Compressed = unsafe extern "C" fn(u32, i32, u32, i32, i32, i32, i32, *const c_void);
+type CompressedSub = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, i32, *const c_void);
 struct Functions {
-    get: extern "C" fn(u32, *mut i32),
-    string: extern "C" fn(u32) -> *const u8,
-    error: extern "C" fn() -> u32,
-    pack: extern "C" fn(u32, i32),
-    bind: extern "C" fn(u32, u32),
+    get: unsafe extern "C" fn(u32, *mut i32),
+    string: unsafe extern "C" fn(u32) -> *const u8,
+    error: unsafe extern "C" fn() -> u32,
+    pack: unsafe extern "C" fn(u32, i32),
+    bind: unsafe extern "C" fn(u32, u32),
     image: Image,
     sub: Sub,
     storage: Option<Storage>,
     storage_ext: Option<Storage>,
     compressed: Compressed,
     compressed_sub: CompressedSub,
-    delete: extern "C" fn(i32, *const u32),
-    copy: extern "C" fn(u32, i32, u32, i32, i32, i32, i32, i32),
-    parameter_i: extern "C" fn(u32, u32, i32),
-    parameter_f: extern "C" fn(u32, u32, f32),
-    parameter_iv: extern "C" fn(u32, u32, *const i32),
-    parameter_fv: extern "C" fn(u32, u32, *const f32),
-    query_i: extern "C" fn(u32, u32, *mut i32),
-    query_f: extern "C" fn(u32, u32, *mut f32),
-    map: Option<extern "C" fn(u32, isize, isize, u32) -> *const c_void>,
-    unmap: Option<extern "C" fn(u32) -> u8>,
-    buffer: Option<extern "C" fn(u32, u32, *mut i32)>,
+    delete: unsafe extern "C" fn(i32, *const u32),
+    copy: unsafe extern "C" fn(u32, i32, u32, i32, i32, i32, i32, i32),
+    parameter_i: unsafe extern "C" fn(u32, u32, i32),
+    parameter_f: unsafe extern "C" fn(u32, u32, f32),
+    parameter_iv: unsafe extern "C" fn(u32, u32, *const i32),
+    parameter_fv: unsafe extern "C" fn(u32, u32, *const f32),
+    query_i: unsafe extern "C" fn(u32, u32, *mut i32),
+    query_f: unsafe extern "C" fn(u32, u32, *mut f32),
+    map: Option<unsafe extern "C" fn(u32, isize, isize, u32) -> *const c_void>,
+    unmap: Option<unsafe extern "C" fn(u32) -> u8>,
+    buffer: Option<unsafe extern "C" fn(u32, u32, *mut i32)>,
 }
 static FUNCTIONS: OnceLock<Option<Functions>> = OnceLock::new();
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -108,18 +109,18 @@ unsafe fn functions(g: &Graphics) -> Option<&'static Functions> {
             Some(unsafe {std::mem::transmute::<usize,$ty>(p)})
         }}};}
         Some(Functions {
-            get:entry!(c"glGetIntegerv",extern "C" fn(u32,*mut i32)),string:entry!(c"glGetString",extern "C" fn(u32)->*const u8),
-            error:entry!(c"glGetError",extern "C" fn()->u32),pack:entry!(c"glPixelStorei",extern "C" fn(u32,i32)),bind:entry!(c"glBindBuffer",extern "C" fn(u32,u32)),
+            get:entry!(c"glGetIntegerv",unsafe extern "C" fn(u32,*mut i32)),string:entry!(c"glGetString",unsafe extern "C" fn(u32)->*const u8),
+            error:entry!(c"glGetError",unsafe extern "C" fn()->u32),pack:entry!(c"glPixelStorei",unsafe extern "C" fn(u32,i32)),bind:entry!(c"glBindBuffer",unsafe extern "C" fn(u32,u32)),
             image:entry!(c"glTexImage2D",Image),sub:entry!(c"glTexSubImage2D",Sub),
             storage:optional!(c"glTexStorage2D",Storage),storage_ext:optional!(c"glTexStorage2DEXT",Storage),
             compressed:entry!(c"glCompressedTexImage2D",Compressed),compressed_sub:entry!(c"glCompressedTexSubImage2D",CompressedSub),
-            delete:entry!(c"glDeleteTextures",extern "C" fn(i32,*const u32)),
-            copy:entry!(c"glCopyTexImage2D",extern "C" fn(u32,i32,u32,i32,i32,i32,i32,i32)),
-            parameter_i:entry!(c"glTexParameteri",extern "C" fn(u32,u32,i32)),parameter_f:entry!(c"glTexParameterf",extern "C" fn(u32,u32,f32)),
-            parameter_iv:entry!(c"glTexParameteriv",extern "C" fn(u32,u32,*const i32)),parameter_fv:entry!(c"glTexParameterfv",extern "C" fn(u32,u32,*const f32)),
-            query_i:entry!(c"glGetTexParameteriv",extern "C" fn(u32,u32,*mut i32)),query_f:entry!(c"glGetTexParameterfv",extern "C" fn(u32,u32,*mut f32)),
-            map:optional!(c"glMapBufferRange",extern "C" fn(u32,isize,isize,u32)->*const c_void),
-            unmap:optional!(c"glUnmapBuffer",extern "C" fn(u32)->u8),buffer:optional!(c"glGetBufferParameteriv",extern "C" fn(u32,u32,*mut i32)),
+            delete:entry!(c"glDeleteTextures",unsafe extern "C" fn(i32,*const u32)),
+            copy:entry!(c"glCopyTexImage2D",unsafe extern "C" fn(u32,i32,u32,i32,i32,i32,i32,i32)),
+            parameter_i:entry!(c"glTexParameteri",unsafe extern "C" fn(u32,u32,i32)),parameter_f:entry!(c"glTexParameterf",unsafe extern "C" fn(u32,u32,f32)),
+            parameter_iv:entry!(c"glTexParameteriv",unsafe extern "C" fn(u32,u32,*const i32)),parameter_fv:entry!(c"glTexParameterfv",unsafe extern "C" fn(u32,u32,*const f32)),
+            query_i:entry!(c"glGetTexParameteriv",unsafe extern "C" fn(u32,u32,*mut i32)),query_f:entry!(c"glGetTexParameterfv",unsafe extern "C" fn(u32,u32,*mut f32)),
+            map:optional!(c"glMapBufferRange",unsafe extern "C" fn(u32,isize,isize,u32)->*const c_void),
+            unmap:optional!(c"glUnmapBuffer",unsafe extern "C" fn(u32)->u8),buffer:optional!(c"glGetBufferParameteriv",unsafe extern "C" fn(u32,u32,*mut i32)),
         })
     }).as_ref()
 }
@@ -168,7 +169,8 @@ impl Call {
         }
         let mut name = 0;
         if target == TEX {
-            (f.get)(0x8069, &mut name);
+            // SAFETY: The query writes to the local output of the declared GLES type.
+            unsafe { (f.get)(0x8069, &mut name) };
         }
         let group = super::shader_gl::context_group(context);
         Some(Self {
@@ -181,7 +183,8 @@ impl Call {
     fn preserve_errors(&self) -> bool {
         let mut good = true;
         for _ in 0..16 {
-            let e = (self.f.error)();
+            // SAFETY: The session pins this driver entry and the caller owns the current context.
+            let e = unsafe { (self.f.error)() };
             if e == 0 {
                 break;
             }
@@ -204,9 +207,11 @@ impl Call {
             if let Some(values) = parameters {
                 for (key, v) in policy::PARAMETERS.into_iter().zip(values) {
                     if matches!(key, 0x813c | 0x813d) {
-                        (self.f.parameter_i)(TEX, key, v.integer());
+                        // SAFETY: The session pins this driver entry and the caller owns the current context.
+                        unsafe { (self.f.parameter_i)(TEX, key, v.integer()) };
                     } else {
-                        (self.f.parameter_f)(TEX, key, v.float());
+                        // SAFETY: The session pins this driver entry and the caller owns the current context.
+                        unsafe { (self.f.parameter_f)(TEX, key, v.float()) };
                     }
                 }
             }
@@ -219,7 +224,8 @@ impl Call {
         if let Some(p) = state(|s| s.parameters(self.key)) {
             return Some(p);
         }
-        let raw = (self.f.string)(0x1f02);
+        // SAFETY: The session pins this driver entry and the caller owns the current context.
+        let raw = unsafe { (self.f.string)(0x1f02) };
         // SAFETY: live driver-owned string is inspected synchronously, with no retained pointer.
         if raw.is_null()
             || !unsafe { CStr::from_ptr(raw.cast()) }
@@ -233,11 +239,13 @@ impl Call {
         for (key, out) in policy::PARAMETERS.into_iter().zip(&mut values) {
             if matches!(key, 0x813c | 0x813d) {
                 let mut v = 0;
-                (self.f.query_i)(TEX, key, &mut v);
+                // SAFETY: The query writes to the local output of the declared GLES type.
+                unsafe { (self.f.query_i)(TEX, key, &mut v) };
                 *out = Param::Int(v);
             } else {
                 let mut v = 0.0;
-                (self.f.query_f)(TEX, key, &mut v);
+                // SAFETY: The query writes to the local output of the declared GLES type.
+                unsafe { (self.f.query_f)(TEX, key, &mut v) };
                 *out = Param::Float(v);
             }
         }
@@ -247,9 +255,11 @@ impl Call {
         if let Some(values) = parameters {
             for (key, v) in policy::PARAMETERS.into_iter().zip(values) {
                 if matches!(key, 0x813c | 0x813d) {
-                    (self.f.parameter_i)(TEX, key, policy::parameter(plan, key, v).integer());
+                    // SAFETY: The session pins this driver entry and the caller owns the current context.
+                    unsafe { (self.f.parameter_i)(TEX, key, policy::parameter(plan, key, v).integer()) };
                 } else {
-                    (self.f.parameter_f)(TEX, key, policy::parameter(plan, key, v).float());
+                    // SAFETY: The session pins this driver entry and the caller owns the current context.
+                    unsafe { (self.f.parameter_f)(TEX, key, policy::parameter(plan, key, v).float()) };
                 }
             }
         }
@@ -259,10 +269,12 @@ impl Call {
     unsafe fn unpack(&self) -> Unpack {
         let q = |k| {
             let mut v = 0;
-            (self.f.get)(k, &mut v);
+            // SAFETY: The query writes to the local output of the declared GLES type.
+            unsafe { (self.f.get)(k, &mut v) };
             v
         };
-        let raw = (self.f.string)(0x1f02);
+        // SAFETY: The session pins this driver entry and the caller owns the current context.
+        let raw = unsafe { (self.f.string)(0x1f02) };
         // SAFETY: live driver-owned NUL-terminated string; never retained.
         let es3 = !raw.is_null()
             && unsafe { CStr::from_ptr(raw.cast()) }
@@ -272,7 +284,8 @@ impl Call {
         let raw = if es3 {
             std::ptr::null()
         } else {
-            (self.f.string)(0x1f03)
+            // SAFETY: The session pins this driver entry and the caller owns the current context.
+            unsafe { (self.f.string)(0x1f03) }
         };
         // SAFETY: same live driver string contract; extension words are inspected synchronously.
         let ext = if raw.is_null() {
@@ -324,8 +337,10 @@ impl Call {
             let (map, unmap, query) = (self.f.map?, self.f.unmap?, self.f.buffer?);
             let mut size = 0;
             let mut mapped = 0;
-            query(PBO, 0x8764, &mut size);
-            query(PBO, 0x88bc, &mut mapped);
+            // SAFETY: The query writes to the local output of the declared GLES type.
+            unsafe { query(PBO, 0x8764, &mut size) };
+            // SAFETY: The query writes to the local output of the declared GLES type.
+            unsafe { query(PBO, 0x88bc, &mut mapped) };
             let offset = data as usize;
             let component = match kind {
                 0x1403 | 0x140b | 0x8363 | 0x8033 | 0x8034 => 2,
@@ -342,25 +357,32 @@ impl Call {
             {
                 return None;
             }
-            let pointer = map(PBO, offset as isize, l.span as isize, 1);
+            // SAFETY: The checked offset and length fit the currently bound buffer.
+            self.preserve_errors();
+            let pointer = unsafe { map(PBO, offset as isize, l.span as isize, 1) };
             if pointer.is_null() {
+                // glMapBufferRange was our private read, never a guest operation.
+                // SAFETY: the same pinned driver/context just failed the private map.
+                let _ = unsafe { (self.f.error)() };
                 return None;
             }
             struct Mapping {
-                unmap: extern "C" fn(u32) -> u8,
+                unmap: unsafe extern "C" fn(u32) -> u8,
                 live: bool,
             }
             impl Drop for Mapping {
                 fn drop(&mut self) {
                     if self.live {
-                        (self.unmap)(PBO);
+                        // SAFETY: This lease owns the successful mapping on the same context.
+                        unsafe { (self.unmap)(PBO) };
                     }
                 }
             }
             let mut lease = Mapping { unmap, live: true };
             // SAFETY: successful bounded READ mapping, kept mapped until resampling finishes.
             let out = run(unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), l.span) });
-            let valid = unmap(PBO) != 0;
+            // SAFETY: This lease owns the successful mapping on the same context.
+            let valid = unsafe { unmap(PBO) } != 0;
             lease.live = false;
             if !valid {
                 return None;
@@ -387,24 +409,30 @@ impl Call {
                         (0x0cf3, self.u.rows),
                         (0x0cf4, self.u.pixels),
                     ] {
-                        (self.f.pack)(k, v);
+                        // SAFETY: The session pins this driver entry and the caller owns the current context.
+                        unsafe { (self.f.pack)(k, v) };
                     }
                 }
-                (self.f.pack)(0x0cf5, self.u.alignment);
+                // SAFETY: The session pins this driver entry and the caller owns the current context.
+                unsafe { (self.f.pack)(0x0cf5, self.u.alignment) };
                 if self.u.buffer != 0 {
-                    (self.f.bind)(PBO, self.u.buffer as u32);
+                    // SAFETY: The session pins this driver entry and the caller owns the current context.
+                    unsafe { (self.f.bind)(PBO, self.u.buffer as u32) };
                 }
             }
         }
         self.preserve_errors();
         let restore = Restore { f: self.f, u };
         if u.buffer != 0 {
-            (self.f.bind)(PBO, 0);
+            // SAFETY: The session pins this driver entry and the caller owns the current context.
+            unsafe { (self.f.bind)(PBO, 0) };
         }
-        (self.f.pack)(0x0cf5, 1);
+        // SAFETY: The session pins this driver entry and the caller owns the current context.
+        unsafe { (self.f.pack)(0x0cf5, 1) };
         if u.row_controls {
             for k in [0x0cf2, 0x0cf3, 0x0cf4] {
-                (self.f.pack)(k, 0);
+                // SAFETY: The session pins this driver entry and the caller owns the current context.
+                unsafe { (self.f.pack)(k, 0) };
             }
         }
         run();
@@ -453,7 +481,8 @@ unsafe fn allocate(target: u32, levels: i32, format: u32, w: i32, h: i32, ext: b
     };
     let (nw, nh, nl) = plan.map_or((w, h, levels), |p| (p.size.0, p.size.1, p.levels));
     // Failed/repeated immutable allocation never replaces a working plan.
-    if c.checked(|| call(target, nl, format, nw, nh)) {
+    // SAFETY: Forward the guest arguments under this entry point’s native GLES contract.
+    if c.checked(|| unsafe { call(target, nl, format, nw, nh) }) {
         if let (Some(p), Some(r)) = (plan, reservation) {
             c.checked(|| c.apply_parameters(p, parameters));
             r.commit(p, parameters);
@@ -499,7 +528,6 @@ unsafe extern "C" fn image(
         };
         let call = c.f.image;
         let old = c.plan();
-        let u = c.unpack();
         let p = if t != TEX || l < 0 || b != 0 || old.is_some_and(|p| p.immutable) {
             None
         } else if l == 0 && state(|s| s.room(c.key)) {
@@ -525,6 +553,7 @@ unsafe extern "C" fn image(
             }
             return;
         };
+        let u = c.unpack();
         let parameters = if l == 0 { c.parameters() } else { None };
         let Some((nw, nh)) = p.level_size(l) else {
             if p.old_size(l) == Some((w, h)) {
@@ -769,6 +798,12 @@ fn mapped_parameter(c: &Call, name: u32, value: Param, call: impl FnOnce(Param))
 unsafe extern "C" fn parameter_i(t: u32, name: u32, value: i32) {
     // SAFETY: native scalar call; no guest pointer or callback is retained.
     unsafe {
+        if t != TEX || !policy::PARAMETERS.contains(&name) {
+            if let Some(g) = active() {
+                if let Some(f) = functions(&g) { (f.parameter_i)(t, name, value); }
+            }
+            return;
+        }
         let Some(c) = Call::enter(t) else {
             return;
         };
@@ -782,6 +817,12 @@ unsafe extern "C" fn parameter_i(t: u32, name: u32, value: i32) {
 unsafe extern "C" fn parameter_f(t: u32, name: u32, value: f32) {
     // SAFETY: native scalar call; only the known mip/LOD parameters are transformed.
     unsafe {
+        if t != TEX || !policy::PARAMETERS.contains(&name) {
+            if let Some(g) = active() {
+                if let Some(f) = functions(&g) { (f.parameter_f)(t, name, value); }
+            }
+            return;
+        }
         let Some(c) = Call::enter(t) else {
             return;
         };
@@ -795,10 +836,16 @@ unsafe extern "C" fn parameter_f(t: u32, name: u32, value: f32) {
 unsafe extern "C" fn parameter_iv(t: u32, name: u32, value: *const i32) {
     // SAFETY: read exactly one element only for one-component mip/LOD pnames; other arrays forward unchanged.
     unsafe {
+        if t != TEX || !policy::PARAMETERS.contains(&name) {
+            if let Some(g) = active() {
+                if let Some(f) = functions(&g) { (f.parameter_iv)(t, name, value); }
+            }
+            return;
+        }
         let Some(c) = Call::enter(t) else {
             return;
         };
-        if policy::PARAMETERS.contains(&name) && !value.is_null() {
+        if !value.is_null() {
             mapped_parameter(&c, name, Param::Int(*value), |v| {
                 (c.f.parameter_i)(t, name, v.integer())
             });
@@ -812,10 +859,16 @@ unsafe extern "C" fn parameter_iv(t: u32, name: u32, value: *const i32) {
 unsafe extern "C" fn parameter_fv(t: u32, name: u32, value: *const f32) {
     // SAFETY: one-component mip pnames read one element; unrelated multi-component arrays are untouched.
     unsafe {
+        if t != TEX || !policy::PARAMETERS.contains(&name) {
+            if let Some(g) = active() {
+                if let Some(f) = functions(&g) { (f.parameter_fv)(t, name, value); }
+            }
+            return;
+        }
         let Some(c) = Call::enter(t) else {
             return;
         };
-        if policy::PARAMETERS.contains(&name) && !value.is_null() {
+        if !value.is_null() {
             mapped_parameter(&c, name, Param::Float(*value), |v| {
                 (c.f.parameter_f)(t, name, v.float())
             });

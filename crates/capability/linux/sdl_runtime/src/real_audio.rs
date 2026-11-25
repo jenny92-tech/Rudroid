@@ -1,3 +1,6 @@
+//! INPUT: producer PCM frames and negotiated SDL audio format
+//! OUTPUT: paced callback output, ring occupancy and device statistics
+//! POS: Linux audio device and SPSC callback boundary
 //! Ticket 92: the real audio-device bridge. A guest-side producer hands
 //! interleaved f32 frames across the deployed capability's C API into an
 //! SDL-owned device, and every observable of the chain — requested vs
@@ -167,8 +170,8 @@ impl FrameRing {
         (write + cycle - read) % cycle
     }
 
-    fn advance(&self, position: usize) -> usize {
-        (position + 1) % (self.capacity_frames() * 2)
+    fn advance(&self, position: usize, frames: usize) -> usize {
+        (position + frames) % (self.capacity_frames() * 2)
     }
 
     /// A third-thread snapshot can straddle consume/refill operations;
@@ -188,16 +191,18 @@ impl FrameRing {
         let channels = self.channels;
         let incoming = samples.len() / channels;
         let accepted = incoming.min(free);
-        let mut write = self.write_pos.load(Ordering::Acquire);
-        for frame in samples[..accepted * channels].chunks_exact(channels) {
-            let slot = (write % self.capacity_frames()) * channels;
-            for (cell, sample) in self.buffer[slot..slot + channels].iter().zip(frame) {
-                // SAFETY: only the producer owns unpublished/free slots.
-                unsafe { cell.get().write(*sample) };
-            }
-            write = self.advance(write);
-            self.write_pos.store(write, Ordering::Release);
+        let write = self.write_pos.load(Ordering::Relaxed);
+        let start = write % self.capacity_frames() * channels;
+        let count = accepted * channels;
+        let first = count.min(self.buffer.len() - start);
+        let base = self.buffer.as_ptr().cast::<f32>().cast_mut();
+        // SAFETY: UnsafeCell<f32> has the layout of f32. The acquired read cursor
+        // gives this producer exclusive ownership of both free ranges until publication.
+        unsafe {
+            std::ptr::copy_nonoverlapping(samples.as_ptr(), base.add(start), first);
+            std::ptr::copy_nonoverlapping(samples.as_ptr().add(first), base, count - first);
         }
+        self.write_pos.store(self.advance(write, accepted), Ordering::Release);
         accepted
     }
 
@@ -206,26 +211,21 @@ impl FrameRing {
     fn pull(&self, out: &mut [f32]) -> usize {
         let channels = self.channels;
         let wanted = out.len() / channels;
-        let mut read = self.read_pos.load(Ordering::Acquire);
+        let read = self.read_pos.load(Ordering::Relaxed);
         let available = self.distance(self.write_pos.load(Ordering::Acquire), read);
         let served = wanted.min(available);
-        for frame in 0..served {
-            let slot = (read % self.capacity_frames()) * channels;
-            let dst = frame * channels;
-            for (sample, cell) in out[dst..dst + channels]
-                .iter_mut()
-                .zip(&self.buffer[slot..slot + channels])
-            {
-                // SAFETY: acquire observed the producer's publication; this
-                // slot is not returned to the producer until read_pos.store.
-                *sample = unsafe { cell.get().read() };
-            }
-            read = self.advance(read);
-            self.read_pos.store(read, Ordering::Release);
+        let start = read % self.capacity_frames() * channels;
+        let count = served * channels;
+        let first = count.min(self.buffer.len() - start);
+        let base = self.buffer.as_ptr().cast::<f32>();
+        // SAFETY: both ranges contain initialized samples published by this
+        // ring's producer. Neither can be reused until read_pos is released.
+        unsafe {
+            std::ptr::copy_nonoverlapping(base.add(start), out.as_mut_ptr(), first);
+            std::ptr::copy_nonoverlapping(base, out.as_mut_ptr().add(first), count - first);
         }
-        for sample in out[served * channels..].iter_mut() {
-            *sample = 0.0;
-        }
+        self.read_pos.store(self.advance(read, served), Ordering::Release);
+        out[count..].fill(0.0);
         served
     }
 }
@@ -309,6 +309,7 @@ impl Pull {
 /// stream is `len` bytes of `APP_FORMAT` samples (format and channels are
 /// not in `allowed_changes`, so SDL feeds exactly the requested layout).
 unsafe extern "C" fn audio_callback(userdata: *mut c_void, stream: *mut u8, len: c_int) {
+    if stream.is_null() || userdata.is_null() || len <= 0 { return; }
     // SAFETY: SDL passes back the `Pull` the device was opened with; it
     // outlives the device (freed only after SDL_CloseAudioDevice).
     let pull = unsafe { &*(userdata as *const Pull) };

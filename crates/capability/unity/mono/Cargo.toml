@@ -1,0 +1,16 @@
+[package]
+name = "rudroid-unity-mono"
+version = "0.0.0"
+edition = "2021"
+license-file.workspace = true
+publish = false
+description = "Optional ARM64 Linux Mono bridge for prepared Unity Android players"
+
+[lib]
+name = "unity_mono"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libloading = "0.8"
+rudroid-common = { path = "../../../common" }
+rudroid-unity-common = { path = "../common" }

@@ -407,25 +407,25 @@ fn singular_registrations_and_failed_init_shutdown() {
 
     // Singular slots: first registration wins, duplicates are rejected, and
     // the host keeps its own copy of the POD.
-    let profile = rudroid_common::registry::RudroidUnityProfile {
+    let profile = rudroid_common::registry::RudroidEngineProfile {
         id: HostStr::new(rudroid_common::descriptor::leak_cstr("unity_2021_3")),
-        player_class: HostStr::null(),
-        player_constructor_signature: HostStr::null(),
-        init_jni_signature: HostStr::null(),
-        flags: rudroid_common::registry::RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG,
-        init_jni_int_arg: 1,
+        validate_config: None,
+        build_guest_plan: None,
         prepare: None,
         bootstrap: None,
         run: None,
     };
-    assert_eq!(runtime::register_unity_profile(Some(&profile)), 0);
+    assert_eq!(runtime::register_engine_profile(Some(&profile)), 0);
     assert_eq!(
-        runtime::register_unity_profile(Some(&profile)),
+        runtime::register_engine_profile(Some(&profile)),
         1,
         "second profile registration is rejected"
     );
     let stored = runtime::registered_profile().expect("profile copy retained");
-    assert_eq!(stored.flags, rudroid_common::registry::RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG);
+    assert_eq!(
+        stored.id.to_cstr().map(|s| s.to_string_lossy().into_owned()).as_deref(),
+        Some("unity_2021_3")
+    );
 
     let policy = rudroid_common::registry::RudroidAudioPolicy {
         id: HostStr::new(rudroid_common::descriptor::leak_cstr("sdl_audio")),
@@ -514,4 +514,48 @@ fn frame_subscription_reentry_applies_to_the_next_snapshot() {
     assert_eq!(EARLY.load(Ordering::Relaxed), 2);
     assert_eq!(LATE.load(Ordering::Relaxed), 1);
     runtime::shutdown();
+}
+
+#[test]
+fn post_main_jni_hooks_are_ordered_fallible_and_cleared_by_shutdown() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    runtime::shutdown();
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ORDER: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn first(
+        context: Option<&rudroid_common::registry::RudroidAfterMainJniContext>,
+        _: *mut std::ffi::c_void,
+    ) -> i32 {
+        let context = context.expect("loader supplies the Main identity");
+        assert_eq!(context.main.kind, rudroid_common::ModuleKind::Main as u32);
+        FIRST_SEEN.store(ORDER.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+        7
+    }
+    extern "C" fn second(
+        _: Option<&rudroid_common::registry::RudroidAfterMainJniContext>,
+        _: *mut std::ffi::c_void,
+    ) -> i32 {
+        ORDER.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+
+    assert_eq!(runtime::register_after_main_jni(first, std::ptr::null_mut()), 0);
+    assert_eq!(runtime::register_after_main_jni(second, std::ptr::null_mut()), 0);
+    let context = rudroid_common::registry::RudroidAfterMainJniContext {
+        main: rudroid_common::registry::RudroidModuleEvent {
+            kind: rudroid_common::ModuleKind::Main as u32,
+            base: 0x1000,
+            name: HostStr::new(rudroid_common::descriptor::leak_cstr("lib/arm64-v8a/libmain.so")),
+        },
+        loader_user: std::ptr::null_mut(),
+        load_and_jni_on_load: None,
+    };
+    assert_eq!(runtime::invoke_after_main_jni(&context), 7);
+    assert_eq!(FIRST_SEEN.load(Ordering::SeqCst), 0);
+    assert_eq!(ORDER.load(Ordering::SeqCst), 1, "failure stops later hooks");
+    runtime::shutdown();
+    assert_eq!(runtime::invoke_after_main_jni(&context), 0);
+    assert_eq!(ORDER.load(Ordering::SeqCst), 1, "shutdown clears the hook table");
 }

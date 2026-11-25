@@ -2,8 +2,8 @@
 //! OUTPUT:  resolved/installed configuration patches or precise rejection diagnostics
 //! POS:    connects config to common's checked native boundary without raw object offsets
 use super::{PatchMode, PatchRequest};
-use rudroid_common::{
-    host_api::HostApiV0,
+use rudroid_common::host_api::HostApiV0;
+use rudroid_unity_common::{
     il2cpp::Il2cpp,
     managed_hooks::{self, ManagedHookPlan, PatchSpec},
 };
@@ -16,14 +16,9 @@ use std::{
 };
 static REQUESTS: OnceLock<Vec<PatchRequest>> = OnceLock::new();
 static LAYOUT: OnceLock<Option<super::layout_config::LayoutRequest>> = OnceLock::new();
-static TOUCH: OnceLock<bool> = OnceLock::new();
 static BASE: AtomicUsize = AtomicUsize::new(0);
 pub(super) fn configure(requests: Vec<PatchRequest>, host: &HostApiV0) {
     let _ = REQUESTS.set(requests);
-    let _ = TOUCH.set(
-        host.config_string(c"package.packageName", 512)
-            .is_some_and(|name| name == "com.game.silksong"),
-    );
     match super::layout_config::LayoutRequest::read(host) {
         Ok(request) => {
             let _ = LAYOUT.set(request);
@@ -50,7 +45,6 @@ pub(super) fn apply(host: &HostApiV0) {
     };
     if requests.is_empty()
         && LAYOUT.get().and_then(Option::as_ref).is_none()
-        && TOUCH.get() != Some(&true)
     {
         return;
     }
@@ -134,22 +128,5 @@ pub(super) fn apply(host: &HostApiV0) {
             Err(reason) => host.log_error(c"UI", &format!("HUD layout rejected: {reason}")),
         }
     }
-    if TOUCH.get() == Some(&true) {
-        let result = ManagedHookPlan::touch_controls(api)
-            .map_err(str::to_owned)
-            .and_then(|plan| {
-                // SAFETY: same post-init idle window; common validates exact setter, array and bool field metadata.
-                unsafe { managed_hooks::install(plan, *host) }
-            });
-        match result {
-            Ok(slot) => host.log_line(
-                c"UI",
-                &format!("TouchManager adapter installed slot={slot}"),
-            ),
-            Err(reason) => host.log_line(
-                c"UI",
-                &format!("TouchManager adapter unavailable: {reason}"),
-            ),
-        }
-    }
+
 }

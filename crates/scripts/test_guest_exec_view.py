@@ -106,10 +106,48 @@ class GuestExecViewTests(unittest.TestCase):
 
     def test_literal_exec_argv_replaces_python(self):
         with patch.object(view, "prepare_view", return_value="already executable"), \
+                patch.object(view, "prepare_network") as network, \
                 patch.object(view.os, "execvp") as execute:
             view.main(["--game-root", str(self.root), "--library-dir", "lib/arm64-v8a",
                        "--", "/bin/game", "literal;argument"])
             execute.assert_called_once_with("/bin/game", ["/bin/game", "literal;argument"])
+            network.assert_not_called()
+
+    def test_explicit_offline_failure_never_executes_or_mounts(self):
+        with patch.object(view, "prepare_network", side_effect=PermissionError("denied")), \
+                patch.object(view, "prepare_view") as mounts, \
+                patch.object(view.os, "execvp") as execute:
+            with self.assertRaises(PermissionError):
+                view.main(["--game-root", str(self.root), "--library-dir", "lib/arm64-v8a",
+                           "--offline-network", "--", "/bin/game"])
+            mounts.assert_not_called()
+            execute.assert_not_called()
+
+    def test_offline_network_is_required_even_on_executable_media(self):
+        calls = []
+        with patch.object(view, "prepare_network", side_effect=lambda: calls.append("network")), \
+                patch.object(view, "prepare_view", side_effect=lambda _: calls.append("view") or "already executable"), \
+                patch.object(view.os, "execvp", side_effect=lambda *_: calls.append("exec")):
+            view.main(["--game-root", str(self.root), "--library-dir", "lib/arm64-v8a",
+                       "--offline-network", "--", "/bin/game"])
+        self.assertEqual(calls, ["network", "view", "exec"])
+
+    def test_offline_network_rejects_system_namespace_and_external_interfaces(self):
+        for same_namespace, interfaces, succeeds in ((False, "lo", True),
+                                                    (True, "lo", False),
+                                                    (False, "lo eth0", False)):
+            with self.subTest(same_namespace=same_namespace, interfaces=interfaces):
+                addresses = ["net:[1]" if same_namespace else "net:[2]", "net:[1]"]
+                table = "header\nheader\n" + "\n".join(name + ": 0" for name in interfaces.split())
+                with patch.object(view, "unshare_namespace") as namespace, \
+                        patch.object(view.os, "readlink", side_effect=addresses), \
+                        patch.object(view.Path, "read_text", return_value=table):
+                    if succeeds:
+                        view.prepare_network()
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            view.prepare_network()
+                    namespace.assert_called_once_with(view.CLONE_NEWNET, "net")
 
     def test_non_linux_fallback_has_no_native_calls(self):
         with patch.object(view.sys, "platform", "darwin"), \

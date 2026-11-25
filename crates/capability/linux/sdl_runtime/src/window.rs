@@ -96,6 +96,8 @@ fn set_native_display_mode(
 /// successful loader runs. Vulkan preflight does not draw a verification frame.
 pub struct SdlSession {
     _context: Option<sdl2::video::GLContext>,
+    #[cfg(target_os = "linux")]
+    native_wayland_buffer: bool,
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
     vulkan_window: Option<super::vulkan::NativeWindow>,
     #[cfg(all(feature = "vulkan", target_os = "linux"))]
@@ -221,7 +223,9 @@ impl SdlSession {
                 .map_err(|e| e.to_string())?;
             // SAFETY: creating thread with the primary context just made
             // current; session lifetime and callback follow our contract.
-            let graphics = unsafe { super::guest_graphics::Graphics::activate(presented,self.render) }?;
+            let graphics = unsafe {
+                super::guest_graphics::Graphics::activate(presented, self.render, self.native_wayland_buffer)
+            }?;
             if let Err(error) = super::jni_input::activate(
                 &self._sdl,
                 graphics.dimensions(),
@@ -273,6 +277,7 @@ impl Drop for SdlSession {
 /// while the session is live. The loader pins its session for process life.
 #[derive(Debug, Clone)]
 pub struct SdlSessionReport {
+    pub graphics_api: u32,
     pub window_w: u32,
     pub window_h: u32,
     /// Active SDL video driver ("x11" under Xvfb; never "dummy").
@@ -359,12 +364,40 @@ pub(crate) fn create_session_vulkan(width: i64, height: i64) -> Result<(SdlSessi
     // Window-local mode emulation uses SDL's existing Wayland viewport. The
     // 100% path remains fullscreen desktop; lower modes are selected only by
     // configure_render before any guest Vulkan object or input service exists.
-    sdl2::hint::set("SDL_VIDEO_WAYLAND_MODE_EMULATION", "1");
+    let previous_emulation = sdl2::hint::get("SDL_VIDEO_WAYLAND_MODE_EMULATION");
+    if !sdl2::hint::set("SDL_VIDEO_WAYLAND_MODE_EMULATION", "1") {
+        return Err(SdlError::Window(
+            "SDL rejected SDL_VIDEO_WAYLAND_MODE_EMULATION=1 for Vulkan Wayland session".into(),
+        ));
+    }
+    struct RestoreHint(Option<String>);
+    impl Drop for RestoreHint {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.0 {
+                let _ = sdl2::hint::set("SDL_VIDEO_WAYLAND_MODE_EMULATION", previous);
+            } else {
+                let _ = sdl2::hint::set("SDL_VIDEO_WAYLAND_MODE_EMULATION", "");
+            }
+        }
+    }
+    let _restore_hint = RestoreHint(previous_emulation);
     let video = sdl.video().map_err(SdlError::Window)?;
     let driver = video.current_video_driver();
     if driver != "wayland" { return Err(SdlError::Vulkan(format!("candidate supports Wayland, active SDL driver is {driver}"))); }
     let window = video.window("RUDROID", width as u32, height as u32).position_centered()
         .fullscreen_desktop().build().map_err(|e| SdlError::Window(e.to_string()))?;
+    // Pump initial Wayland configure events so pixel_extent observes the settled fullscreen output.
+    if let Ok(mut events) = sdl.event_pump() {
+        for _ in 0..10 {
+            events.pump_events();
+            if let Ok((pw, ph)) = super::vulkan::pixel_extent(&window) {
+                if pw > 0 && ph > 0 {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
     let (native, observed) = super::vulkan::NativeWindow::inspect(&window).map_err(SdlError::Vulkan)?;
     let (pixel_w, pixel_h) = super::vulkan::pixel_extent(&window).map_err(SdlError::Vulkan)?;
     if !(1..=16384).contains(&pixel_w) || !(1..=16384).contains(&pixel_h) {
@@ -372,12 +405,15 @@ pub(crate) fn create_session_vulkan(width: i64, height: i64) -> Result<(SdlSessi
     }
     let text = |s: String| CString::new(s).map(Arc::<CStr>::from).map_err(|_| SdlError::Vulkan("driver text contains NUL".into()));
     let strings = [text(observed.version)?, text(observed.renderer)?, text(observed.vendor)?];
-    let report = SdlSessionReport { window_w: pixel_w as u32, window_h: pixel_h as u32,
+    let report = SdlSessionReport {
+        graphics_api: rudroid_common::sdl_abi::GRAPHICS_API_VULKAN,
+        window_w: pixel_w as u32, window_h: pixel_h as u32,
         video_driver: text(driver.into())?, major: observed.major, minor: observed.minor, profile_mask: 0,
         gl_version: strings[0].clone(), gl_renderer: strings[1].clone(), gl_vendor: strings[2].clone(),
         gl_strings: strings, swap_count: 0, readback_non_background: false };
     rudroid_common::diagnostic!("[SDL] Vulkan Wayland preflight: output={pixel_w}x{pixel_h}; guest presentation pending");
     let session = SdlSession { _context: None, _window: window, _sdl: sdl, report: report.clone(),
+        native_wayland_buffer: false,
         render: None, guest_graphics: None, creator: std::thread::current().id(),
         vulkan_window: Some(native), guest_vulkan: None, vulkan_render_attempted: false };
     Ok((session, report))
@@ -675,7 +711,7 @@ fn create_session_impl(
         .gl_make_current(&context)
         .map_err(|e| SdlError::Context(e.to_string()))?;
     let (window_w, window_h) = window.size();
-    let (drawable_w, drawable_h) = window.drawable_size();
+    let (mut drawable_w, mut drawable_h) = window.drawable_size();
     if !(1..=16384).contains(&drawable_w) || !(1..=16384).contains(&drawable_h) {
         return Err(SdlError::Window(format!(
             "invalid actual drawable geometry {drawable_w}x{drawable_h}"
@@ -744,7 +780,8 @@ fn create_session_impl(
         let expected = (width as u32, height as u32);
         loop {
             events.pump_events();
-            if (drawable_w, drawable_h) == expected && window.size() == expected && window.drawable_size() == expected { break; }
+            (drawable_w, drawable_h) = window.drawable_size();
+            if (drawable_w, drawable_h) == expected && window.size() == expected { break; }
             if std::time::Instant::now() >= deadline {
                 return Err(SdlError::Window(format!(
                     "Wayland did not retain requested native buffer {width}x{height}: window={:?} drawable={:?}",
@@ -757,6 +794,7 @@ fn create_session_impl(
     }
 
     let report = SdlSessionReport {
+        graphics_api: rudroid_common::sdl_abi::GRAPHICS_API_GLES,
         window_w: drawable_w,
         window_h: drawable_h,
         video_driver: Arc::from(CString::new(driver).expect("SDL driver has no embedded NUL")),
@@ -784,6 +822,8 @@ fn create_session_impl(
     Ok((
         SdlSession {
             _context: Some(context),
+            #[cfg(target_os = "linux")]
+            native_wayland_buffer: native_buffer,
             #[cfg(all(feature = "vulkan", target_os = "linux"))]
             vulkan_window: None,
             #[cfg(all(feature = "vulkan", target_os = "linux"))]

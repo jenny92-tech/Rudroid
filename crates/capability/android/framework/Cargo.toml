@@ -14,5 +14,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rudroid-common = { path = "../../../common" }
-rudroid-reply-catalog-format = { path = "../reply_catalog/format" }
 serde_json = "1"

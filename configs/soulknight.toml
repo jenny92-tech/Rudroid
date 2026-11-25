@@ -1,0 +1,68 @@
+# Soul Knight 8.7.0 / Unity 2022.3.62f2, ARM64.
+# Port root contains assets/, lib/ and assetpacks/. This sample disables
+# extra rendering optimizations and keeps original resource dimensions.
+
+[paths]
+game_files = "./"
+support_files = "./"
+library = "lib/arm64-v8a"
+android_package_code = "./apks/base.apk"
+android_data = "./conf/data/"
+android_external_files = "./conf/files/"
+android_files = "./conf/"
+android_cache = "./cache/"
+android_obb_dirs = ["./assetpacks/"]
+android_source_dirs = ["./apks/config.arm64_v8a.apk", "./apks/UnityDataAssetPack.apk"]
+# The original SDK bootstrap owns this chain after Main. libu8t depends on
+# libanort's versioned exports and must not be mapped before that gate.
+guest_preload = []
+
+[package]
+packageName = "com.ChillyRoom.DungeonShooter"
+versionName = "8.7.0"
+versionCode = 80700
+minSdkVersion = 23
+targetSdkVersion = 36
+mainIntentBundle = { unity = "" }
+
+[gpu]
+graphicsApi = "gles"
+renderScalePercent = 100
+renderScaleSharp = true
+textureMaxDim = 0
+textureMaxDimRGBA8 = 0
+textureMaxDimETC2 = 0
+textureMaxDimASTC = 0
+disableFramebufferInvalidate = false
+disableProgramBinary = false
+disableScreenRefraction = false
+skipDisabledShaderDraws = false
+
+[plugins]
+enabled = [
+    "platform_log_stderr", "android_base", "android_jni_vm", "reply_catalog",
+    "android_elf_load", "android_bionic", "android_native_events",
+    "android_media_fallback", "android_zlib", "android_assets",
+    "platform_android_asset_packs", "platform_sdl_runtime", "unity_2022_3",
+    "sdk_fmod", "soul_knight",
+]
+
+# This title embeds FMOD inside libunity: the addon contributes only the
+# org/fmod Java surface plus the real AudioOutput/PCM mixer bridge in audio.rs.
+# It is NOT a separate licensed libfmod/libfmodstudio deployment and claims no
+# SDK, authorization, mixer-open or audible-output success. No silence,
+# cached-format, clocked or diagnostic switch is enabled here.
+[sdk_fmod]
+embedded_unity_audio = true
+
+# Explicit research candidate; leave disabled for the ordinary bootstrap path.
+# Enabling also requires adding "il2cpp_patch" to plugins.enabled and deployment.
+# Launch the runtime in an independent empty network namespace; merely blocking
+# a phone UID or setting a config boolean is not sufficient for this mode.
+# Set a generated rudroid-offline-80700-<32 lowercase hex> local_profile_id and
+# a fresh profile_root, with all four android_data/files/external_files/cache
+# paths configured as separate subdirectories inside it. No old save is imported.
+[game_patches.soul_knight]
+offline = false
+local_profile_id = ""
+profile_root = ""

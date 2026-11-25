@@ -1,3 +1,6 @@
+//! INPUT: opaque catalog handles and C lookup arguments
+//! OUTPUT: C query and catalog handle lifecycle operations
+//! POS: native boundary of the reply provider
 //! C FFI surface of the Reply Catalog cdylib.
 //!
 //! POD in/out-params only; handles are opaque pointers. Symbol names mirror

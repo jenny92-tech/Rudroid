@@ -2,7 +2,8 @@
 //! OUTPUT:  owned validated HUD requests borrowing a common HudSpec at installation
 //! POS:    safe configuration reader shared by the production initialization path and regressions
 #![forbid(unsafe_code)]
-use rudroid_common::{host_api::HostApiV0, hud_layout::HudSpec};
+use rudroid_common::host_api::HostApiV0;
+use rudroid_unity_common::hud_layout::HudSpec;
 use std::ffi::{CStr, CString};
 pub(super) struct LayoutRequest {
     assembly: CString,

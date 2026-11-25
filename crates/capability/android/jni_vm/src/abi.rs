@@ -1,3 +1,6 @@
+//! INPUT: documented JavaVM and JNIEnv slot layout
+//! OUTPUT: process-lifetime JNI tables wired to implemented shims
+//! POS: native ABI surface of the shared VM
 //! The minimal JavaVM/JNIEnv C ABI of the shared session (ticket 52).
 //!
 //! Layout authority for the kit's guest-facing JNI tables. The slot order

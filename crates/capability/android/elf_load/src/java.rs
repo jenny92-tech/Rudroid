@@ -19,8 +19,10 @@ fn load(env:JniEnv,name:JObject,library:bool) {
     let path=if library {format!("lib{requested}.so")}else{requested.clone()};
     // The loader already maps and initializes the selected guest modules.
     // System.load must acknowledge that same image, never initialize it twice.
-    let name=std::path::Path::new(&path).file_name().and_then(|n|n.to_str()).and_then(|n|CString::new(n).ok());
-    let loaded=name.is_some_and(|name| {
+    let normalized = path.strip_prefix("./").unwrap_or(&path);
+    let name=std::path::Path::new(normalized).file_name().and_then(|n|n.to_str()).and_then(|n|CString::new(n).ok());
+    let native_alias=CString::new(normalized).ok().is_some_and(|name|super::libdl::native_alias_available(&name));
+    let loaded=native_alias || name.is_some_and(|name| {
         super::libdl::java_service_available(&name)
             || super::exec::reopen_guest(&name).is_some_and(super::exec::close_guest)
     });

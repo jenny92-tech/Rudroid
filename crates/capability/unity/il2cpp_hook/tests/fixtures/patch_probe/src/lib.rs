@@ -126,7 +126,8 @@ extern "C" fn rudroid_plugin_init(api: Option<&'static HostApiV0>) -> c_int {
     let (ret, hook) = read_string(api, c"il2cpp_hooks.extra_probe", c"?");
     log(api, &format!("hook.extra={hook} ret={ret}"));
 
-    // config_set_string is an explicit v0 failure — never a silent write.
+    // config_set_string refuses arbitrary user config mutations (returns 0),
+    // leaving the installed Host Config value untouched.
     let set_ret = (api.config_set_string)(HostStr::new(c"il2cpp_patch.0.class"), HostStr::new(c"HACKED"));
     log(api, &format!("set.ret={set_ret}"));
     let (ret, after) = read_string(api, c"il2cpp_patch.0.class", c"?");

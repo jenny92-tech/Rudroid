@@ -1,4 +1,4 @@
-//! INPUT:  shared native-build contract, nine C ABI boundaries and two ARM64 assembly adapters
+//! INPUT:  shared native-build contract, ten C ABI boundaries and four ARM64 assembly adapters
 //! OUTPUT:  a private PIC archive linked only into android_bionic on Linux ARM64
 //! POS:    compiles the small C ABI boundary without another dependency or plugin
 fn main() {
@@ -14,10 +14,13 @@ fn main() {
             "src/logging.c",
             "src/signals.c",
             "src/jump.c",
+            "src/libstdcxx.c",
             "src/jump.S",
             "src/ioctl.S",
+            "src/syscall.S",
+            "src/sync_entry.S",
         ],
-        headers: &["src/symbol_table.h"],
+        headers: &["src/symbol_table.h", "src/posix_layout.h"],
         extra_flags: &[],
         link: &["m", "dl"],
     });

@@ -1,0 +1,28 @@
+PortMaster-Unity 7f617e282953f8981ca4a38537277a8a9983ff90
+Source: https://github.com/wild1walker/portmaster-unity/blob/7f617e282953f8981ca4a38537277a8a9983ff90/tools/mono64/build-mono.sh
+Originally maintained at jenny92-tech/portmaster-launcher-pack _kit/pmunity-mono64-no-thread-local-alloc.patch.
+
+Keep the Boehm GC and 8-byte granule. Disable only the thread-local allocation fast
+path and isolate the build volume so the configure result cannot be reused across
+the control and patched builds.
+
+--- a/tools/mono64/build-mono.sh
++++ b/tools/mono64/build-mono.sh
+@@ -79,7 +79,7 @@
+ cp "$D/.fetched" "$W/out/$B/SOURCE.txt"         # which commits the libraries were built from
+ docker image inspect ua-build-arm64 >/dev/null 2>&1 || docker build --platform linux/arm64 -t ua-build-arm64 "$PU/runtime/docker/arm64"
+ docker image inspect ua-mono64-build >/dev/null 2>&1 || docker build --platform linux/arm64 -t ua-mono64-build "$HERE"
+-docker run --rm --platform linux/arm64 -v ua-mono64:/b -v "$D":/src:ro -v "$W/out/$B":/out ua-mono64-build bash -c '
++docker run --rm --platform linux/arm64 -v ua-mono64-no-thread-local-alloc:/b -v "$D":/src:ro -v "$W/out/$B":/out ua-mono64-build bash -c '
+ set -e
+ B='"$B"'
+ [ -f /b/$B/.copied ] || { rm -rf /b/$B; mkdir -p /b/$B; cp -a /src/. /b/$B/; touch /b/$B/.copied; }
+@@ -117,7 +117,7 @@
+   NOCONFIGURE=1 ./autogen.sh > /out/autogen.log 2>&1 || { tail -30 /out/autogen.log; exit 1; }
+   ./configure --prefix=/b/$B-inst --host=aarch64-pc-linux-gnu --disable-mcs-build --with-mcs-docs=no \
+     --with-glib=embedded --disable-nls --disable-btls --with-monotouch=no --disable-parallel-mark \
+-    --with-sgen=no $GC > /out/configure.log 2>&1 || { tail -40 /out/configure.log; exit 1; }
++    --with-sgen=no $GC --disable-thread-local-alloc > /out/configure.log 2>&1 || { tail -40 /out/configure.log; exit 1; }
+ fi
+ : > /out/make.log
+ # (eglib: at the top of the tree in Mono 5.0 - 2017.4 - and in mono/ later)

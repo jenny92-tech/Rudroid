@@ -3,7 +3,7 @@
 > SDL backend that owns the window/GLES session and serves guest EGL/GLES/ANativeWindow, audio and input from it.
 
 ## Role
-Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for Silksong. The loader dlsyms its C API (names in `c_api::symbols`, mirrored by loader constants under a parity test). The real backend needs the optional `sdl` feature, enabled by the device build through the kit features.
+Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for Silksong. The loader dlsyms its C API (symbols and report layout shared through `rudroid_common::sdl_abi`). The real backend needs the optional `sdl` feature, enabled by the device build through the kit features.
 
 ## Design
 
@@ -42,6 +42,38 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
   lock; removal releases keys/axes before retiring inventory and globals.
 - Capture/trace/statistics are opt-in. Ordinary shader/texture evidence is bounded;
   no diagnostic worker or periodic gameplay I/O is added.
+- `RUDROID_DIAG_GL_GEOMETRY_ROUTE=1` with `RUDROID_DIAGNOSTICS=1` wraps
+  selected GLES lookups for a private count-only run. It reports capped
+  buckets and overflow at UnityStopping before terminal process exit.
+  Keep it unset during timing. The wrapper neither changes the selected
+  GL operation nor reads mapped contents; normal games keep their pointers.
+- `RUDROID_DIAG_GL_OBJECT_CENSUS=1` with diagnostics and the whole-buffer hint
+  disabled records bounded native buffer/VAO observations on the primary GLES 3
+  context. It uses read-only driver binding queries, samples enabled vertex
+  inputs, records unwrapped names as lookups only and reports namespace reuse
+  uncertainty and overflow at UnityStopping. It provides workload evidence.
+  Arena admission would require an independent runtime ownership guard.
+- `RUDROID_DIAG_GL_ALIAS_GUARD=1` exposes typed GLES texture-buffer and range
+  trampolines before ELF/EGL address publication. It records native object
+  lifetimes and confirmed named texture bindings with diagnostics enabled and
+  the whole-buffer hint disabled. The prototype has no production arena owner.
+  Shared contexts and unclassified consumers keep the native store authoritative.
+- The optional `gpu.glesWholeBufferInvalidate` title experiment uses the
+  driver's whole-store invalidation hint only for an exact full dynamic/stream
+  buffer map through a primary GLES array, element-array or copy-write
+  target. The native size query follows the current binding, including the
+  active VAO's index buffer. The driver retains
+  buffer names, mapped ranges, flush, VAO bindings, offsets, draws and teardown.
+  The guest still reads the original access flags on active translated maps.
+  Unsupported displays, targets, partial maps and maps over the bounded
+  tracking capacity retain their original driver calls.
+- Diagnostics bound guest window/context/bind/swap phase records to96 per
+  session. They contain ownership/result booleans and host thread identity,
+  consume no EGL error and do not establish a rendered frame.
+- Private Wayland interval comparisons explicitly select the verified native
+  drawable. Both arms validate the same guest interval through EGL and record
+  SDL swap wall time and thread CPU. The SDL arm also hands valid 0/1 requests to
+  SDL on its current primary context. Samples are bounded and flush at UnityStopping.
 - Explicit render-thread placement captures the initial permitted CPU mask before
   Unity narrows it, then runs once on the first successful guest present. GLES
   and Vulkan share the safe common current-thread boundary. It requires the
@@ -54,6 +86,8 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
 - Unity's unconditional EGL imports share the existing checked facade even in
   Vulkan mode. Without a GLES session they report uninitialized; never forward
   Android window tokens to native Wayland EGL functions.
+
+The optional `diag-probes` feature compiles geometry and Wayland interval probes and `src/frame_capture.rs`. Private runs also require `RUDROID_DIAGNOSTICS=1`.
 
 ## Constraints
 - Successful startup, geometry, render and texture counters use shared opt-in diagnostics; operational graphics/audio failures remain error records. Logging policy must not change graphics, input or audio behavior.
@@ -88,7 +122,9 @@ Capability `platform_sdl_runtime`, kind `platform`, no `requires`; deployed for 
 | Crate root | `src/lib.rs` | Descriptor, window config and GLES ladder, JNI registration, C API |
 | Window session | `src/window.rs` | SDL window, GLES context verification, session report |
 | Startup brand | `src/startup_brand.rs`, `assets/` | Safe one-shot RUDROID layout, approved empty-handed Jenny92 half-body character and embedded RGBA8 pixels |
-| Guest graphics | `src/guest_graphics.rs` | EGL facade, GL address cache, ANativeWindow, swap, frame capture |
+| Guest graphics | `src/guest_graphics.rs` | EGL facade, GL address cache, swap, frame capture |
+| C API | `src/c_api.rs` | Opaque window and audio handles, C reports and error channel |
+| Native window ABI | `src/native_window.rs` | Shared lease, identity, extent and geometry checks for GLES and Vulkan |
 | Vulkan bridge | `src/vulkan.rs` | Optional typed native Vulkan dispatch, Android-to-Wayland surface, actual presentation notifications and process-pinned tables |
 | Render scaling | `src/render_scale.rs` | Typed native GL objects, scaled default framebuffer, sharp/linear presentation and quiescent cleanup |
 | Scaled GL facade | `src/scaled_gl.rs` | Default-buffer binds/queries, attachment translation and private framebuffer ownership |

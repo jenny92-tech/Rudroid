@@ -4,6 +4,9 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "completeness.rs"]
+mod completeness;
+
 fn query(name: &[u8], library: Option<&CStr>, version: Option<&CStr>) -> usize {
     let name = std::ffi::CString::new(name).unwrap();
     // SAFETY: valid strings for the duration of the call.
@@ -50,10 +53,31 @@ fn libc_providers_answer_disjoint_names() {
 
 #[test]
 fn provider_tables_have_no_internal_duplicates() {
-    for provider in LIBC.iter().chain([&LOGGING, &MATH]) {
+    for provider in LIBC.iter().chain([&LOGGING, &MATH, &LIBSTDCXX]) {
         let names = (provider.names)();
         let unique: BTreeSet<_> = names.iter().collect();
         assert_eq!(unique.len(), names.len(), "{} lists a name twice", provider.label);
+    }
+}
+
+#[test]
+fn libstdcxx_runtime_is_exact_versioned_and_disjoint_from_libc() {
+    let libc = libc_names();
+    let names = (LIBSTDCXX.names)();
+    assert_eq!(names.len(), 8);
+    let versioned: BTreeSet<_> = LIBSTDCXX_VERSIONED.iter().map(|(name, _)| name).collect();
+    assert_eq!(versioned.len(), names.len());
+    for (name, version) in LIBSTDCXX_VERSIONED {
+        assert_eq!(*version, LIBSTDCXX_VERSION);
+        assert!(names.contains(name), "{} is versioned but unowned", lossy(name));
+    }
+    for name in names {
+        assert!(!libc.contains_key(name), "libc shadows {}", lossy(name));
+        assert_ne!(query(name, Some(c"libstdc++.so"), Some(LIBSTDCXX_VERSION)), 0, "{}", lossy(name));
+        assert_eq!(query(name, Some(c"libstdc++.so"), Some(c"LIBC")), 0, "{}", lossy(name));
+        assert_eq!(query(name, Some(c"libstdc++.so.6"), Some(LIBSTDCXX_VERSION)), 0, "{}", lossy(name));
+        assert_eq!(query(name, Some(c"libc.so"), Some(c"LIBC_O")), 0, "{}", lossy(name));
+        assert_eq!(query(name, None, None), 0, "{}", lossy(name));
     }
 }
 

@@ -1,8 +1,11 @@
 //! INPUT:  fresh loader processes, three memory modes and immutable extracted boot fixtures
 //! OUTPUT:  shared Java/NDK/native policy projection, retry and concurrent publication checks
-//! POS:    verifies startup ownership and effective values without executing game code
+//! POS:    verifies prepare-path overlay ownership without executing game code
 use rudroid_common::android_assets::{BASE, MERGED, PATH};
 use rudroid_host_config::HostConfig;
+use rudroid_unity_common::{
+    unity_startup_policy, unity_startup_policy_from_api, BootView, UnityRenderThread,
+};
 use rudroid_unity_loader::host_api;
 use std::io::Write;
 use std::{ffi::CString, path::PathBuf};
@@ -40,6 +43,29 @@ fn config(root: &std::path::Path, mode: &str, rendering: &str) -> HostConfig {
     HostConfig::parse(&format!("[paths]\ngame_files={:?}\n[runtime]\nmemory_mode={mode:?}\n[unity]\nrender_thread_mode={rendering:?}\n[package.mainIntentBundle]\nunity='-force-gles30'\n",root.to_str().unwrap())).unwrap()
 }
 
+/// Mirror player_lifecycle prepare: resolve via `unity_startup_policy_from_api`,
+/// register FILE_OVERLAY first, then publish command-line override.
+fn publish_boot_overlay(
+    api: &rudroid_common::host_api::HostApiV0,
+    source: &std::path::Path,
+) -> Result<Option<BootView>, &'static str> {
+    let policy = unity_startup_policy_from_api(api)?;
+    if policy.render_thread() == UnityRenderThread::Engine {
+        return Ok(None);
+    }
+    let view = BootView::prepare(source, &policy)?;
+    if !api.register_file_overlay(view.source_cstr(), view.replacement_cstr()) {
+        return Err("overlay registration refused");
+    }
+    if let Some(cmd) = policy.command_line() {
+        let value = CString::new(cmd.replace('\0', "")).map_err(|_| "command line NUL")?;
+        if !api.set_config_string(c"package.mainIntentBundle.unity", &value) {
+            return Err("set_config_string refused");
+        }
+    }
+    Ok(Some(view))
+}
+
 #[test]
 fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
     let Ok(case) = std::env::var("RUDROID_TEST_STARTUP_MODE") else {
@@ -50,6 +76,7 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
             "override",
             "race",
             "unknown-engine",
+            "conflict",
         ] {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -66,14 +93,33 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
     let root = std::env::temp_dir().join(format!("rudroid-startup-{}", std::process::id()));
     std::fs::create_dir_all(root.join("assets/bin/Data")).unwrap();
     let source = root.join("assets/bin/Data/boot.config");
-    // A failed explicit projection must not freeze a partial config/resource service.
+    let api = host_api::table();
+    if case == "conflict" {
+        let conflicting = HostConfig::parse(&format!(
+            "[paths]\ngame_files={:?}\n[unity]\nrender_thread_mode='multi'\n[package.mainIntentBundle]\nunity='-force-gfx-direct'\n",
+            root.to_str().unwrap()
+        ))
+        .unwrap();
+        host_api::install_config(Some(conflicting)).unwrap();
+        assert!(unity_startup_policy_from_api(api).is_err());
+        // HostConfig stays immutable outside package.mainIntentBundle.<key>.
+        assert!(!api.set_config_string(c"paths.game_files", c"/evil"));
+        assert_eq!(
+            api.config_string(c"paths.game_files", 4096).as_deref(),
+            Some(root.to_str().unwrap())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    // Prepare-path overlay rejects bad boot before the Host Config is frozen.
     std::fs::write(&source, "unrecognized=1\n").unwrap();
-    assert!(host_api::install_config(Some(config(&root, "performance", "memory_mode"))).is_err());
+    let perf_policy = unity_startup_policy(&config(&root, "performance", "memory_mode")).unwrap();
     native_fixture(&root, false);
-    assert!(host_api::install_config(Some(config(&root, "performance", "memory_mode"))).is_err());
+    assert!(BootView::prepare(&source, &perf_policy).is_err());
     native_fixture(&root, true);
-    assert!(host_api::install_config(Some(config(&root, "performance", "memory_mode"))).is_err());
+    assert!(BootView::prepare(&source, &perf_policy).is_err());
     std::fs::write(&source, BOOT).unwrap();
+    let published;
     if case == "race" {
         let start = std::sync::Arc::new(std::sync::Barrier::new(12));
         let threads: Vec<_> = (0..12)
@@ -98,6 +144,7 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
         for t in threads {
             t.join().unwrap();
         }
+        published = publish_boot_overlay(api, &source).unwrap();
     } else {
         let (mode, rendering) = if case == "unknown-engine" {
             native_fixture(&root, false);
@@ -107,20 +154,17 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
         } else {
             (case.as_str(), "memory_mode")
         };
-        host_api::install_config(Some(config(&root, mode, rendering))).unwrap();
+        let cfg = config(&root, mode, rendering);
+        host_api::install_config(Some(cfg)).unwrap();
+        published = publish_boot_overlay(api, &source).unwrap();
     }
-    let api = host_api::table();
-    let thread = host_api::unity_render_thread();
+    // Second publish must be rejected (first-write-wins overlay + cmdline).
+    let thread = unity_startup_policy_from_api(api).unwrap().render_thread();
+    if thread != UnityRenderThread::Engine {
+        assert!(publish_boot_overlay(api, &source).is_err());
+        assert!(!api.set_config_string(c"package.mainIntentBundle.unity", c"-clobber"));
+    }
     let prefix = format!("rudroid-boot-{}-", std::process::id());
-    let owners = std::fs::read_dir("/proc/self/fd")
-        .unwrap()
-        .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
-        .filter(|p| p.to_string_lossy().contains(&prefix))
-        .count();
-    assert_eq!(
-        owners,
-        usize::from(thread != rudroid_host_config::UnityRenderThread::Engine)
-    );
     assert_eq!(
         std::fs::read_dir(std::env::temp_dir())
             .unwrap()
@@ -130,13 +174,24 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
         0
     );
     let wanted = match thread {
-        rudroid_host_config::UnityRenderThread::Engine => BOOT.to_owned(),
-        rudroid_host_config::UnityRenderThread::Single => BOOT.to_owned(),
-        rudroid_host_config::UnityRenderThread::Multi => BOOT
+        UnityRenderThread::Engine => BOOT.to_owned(),
+        UnityRenderThread::Single => BOOT.to_owned(),
+        UnityRenderThread::Multi => BOOT
             .replace("force-gfx-direct=1", "force-gfx-direct=0")
             .replace("gfx-threading-mode=0", "gfx-threading-mode=1")
             .replace("gfx-disable-mt-rendering=1", "gfx-disable-mt-rendering=0"),
     };
+    let owners = std::fs::read_dir("/proc/self/fd").unwrap()
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|fd| std::fs::read_link(fd).is_ok_and(|path|
+            path.as_os_str().as_encoded_bytes().starts_with(b"/memfd:rudroid-snapshot ")))
+        .filter(|fd| std::fs::read(fd).is_ok_and(|bytes| bytes == wanted.as_bytes()))
+        .count();
+    assert_eq!(owners, usize::from(thread != UnityRenderThread::Engine));
+    assert_eq!(
+        published.is_some(),
+        thread != UnityRenderThread::Engine
+    );
     for kind in [BASE, MERGED] {
         let path = api
             .asset_path(kind, c"bin/Data/boot.config", None, 0)
@@ -173,19 +228,20 @@ fn startup_modes_reach_all_resource_entries_and_publish_one_owner() {
         .unwrap();
     assert!(args.starts_with("-force-gles30"));
     match thread {
-        rudroid_host_config::UnityRenderThread::Engine => assert_eq!(args, "-force-gles30"),
-        rudroid_host_config::UnityRenderThread::Single => {
+        UnityRenderThread::Engine => assert_eq!(args, "-force-gles30"),
+        UnityRenderThread::Single => {
             assert!(args.ends_with("-force-gfx-direct"))
         }
-        rudroid_host_config::UnityRenderThread::Multi => assert!(args.ends_with("-force-gfx-mt")),
+        UnityRenderThread::Multi => assert!(args.ends_with("-force-gfx-mt")),
     }
     if case == "race" {
         assert_eq!(
-            thread == rudroid_host_config::UnityRenderThread::Multi,
+            thread == UnityRenderThread::Multi,
             host_api::memory_policy().mode
                 == rudroid_common::runtime_policy::MemoryMode::Performance
         );
     }
     assert_eq!(std::fs::read_to_string(&source).unwrap(), BOOT);
+    drop(published);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -9,7 +9,8 @@ fn direct_stderr_call_is_safe_for_null_and_bad_utf8() {
     let tag = CString::new("PLUGIN").unwrap();
     let message = CString::new("hello from log_stderr test").unwrap();
     // This writes the line to the captured test stderr output; the
-    // end-to-end run in crates/docs/E2E-DEMO.md shows it in a real terminal.
+    // Real-terminal acceptance evidence lives in crates/docs/ACCEPTANCE.md /
+    // BUILD-DOCKER.md verification layers; this unit only checks the sink.
     unsafe {
         rudroid_log_stderr(tag.as_ptr(), message.as_ptr());
         // Null / invalid inputs must not crash the host.

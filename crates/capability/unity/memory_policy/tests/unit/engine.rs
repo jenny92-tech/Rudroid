@@ -2,7 +2,7 @@
 //! OUTPUT:  `tests` unit tests, compiled into the crate only under cfg(test)
 //! POS:    keeps test bodies out of `src/engine.rs`; declared there with `#[path]`
 use super::*;
-use rudroid_common::il2cpp_abi::GcHandleAbi;
+use rudroid_unity_common::il2cpp_abi::GcHandleAbi;
 use rudroid_common::registry::HostStr;
 use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};

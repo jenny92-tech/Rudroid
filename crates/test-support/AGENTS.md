@@ -3,7 +3,7 @@
 > Dev-only shared test library: serial lock, log capture, module-subscription fake, and the single path for nested cargo builds and guest C fixtures.
 
 ## Role
-Package `rudroid-test-support`, a plain library with no descriptor or binary that never ships. It is only a `[dev-dependencies]` entry of `project/unity_loader`, `capability/unity/il2cpp_hook` and the `silksong`/`hollow_knight` gamepatches, and depends only on `rudroid-common`.
+Package `rudroid-test-support`, a plain library with no descriptor or binary that never ships. It is a `[dev-dependencies]` entry of the loader/host tests and several capabilities (including `il2cpp_hook`, gamepatches, `sdl_runtime`, `native_activity`); never a production link. Depends only on `rudroid-common`.
 
 ## Design
 - `serial_lock()` (poison-tolerant per-binary mutex) and `LogCapture::shared()` (process-global `"tag: message"` buffer) cover process-global test state.

@@ -26,8 +26,16 @@ import/执行语句之前。先阅读实现和公开接口，不从文件名猜�
 不重复建文档；fixture 的 ABI/生命周期证据随实现保留。
 
 命令归 BUILD-DOCKER，开发与踩坑归 DEVELOPMENT，能力归 MIGRATION-MAP，
-配置归 RUNTIME-POLICY，交付归 ACCEPTANCE，性能取舍归 PERFORMANCE-AUDIT。
+EngineProfile 契约归 ENGINE-PROFILE-CONTRACT，配置归 RUNTIME-POLICY，交付归 ACCEPTANCE，
+性能取舍归 PERFORMANCE-AUDIT，**可执行工具/脚本/调试入口登记归 TOOLING**。
 删掉过时日报和重复说明，只留下仍会影响实现的失败原因及复现前提。
+
+知识页先写清宏观逻辑（对象、分层、激活条件、证据不能互相代替），再列约束与
+落点；字段/命令/函数级细节指到实现、AGENTS 或 BUILD-DOCKER，不在索引文里堆平铺清单。
+
+新增或改写脚本、调试开关、离线审计 CLI 前先读 [TOOLING](docs/TOOLING.md)：
+复用已登记入口，禁止平行第二套；过时入口删除并同步登记表与 AGENTS Contents。
+`.scratch/` 任务输出不是正式工具。
 
 ## 变更检查
 

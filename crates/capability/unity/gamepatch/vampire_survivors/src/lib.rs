@@ -6,10 +6,10 @@
 use rudroid_common::{
     arm64_detour::Original,
     host_api::{HostApiV0, HOST_API_VERSION},
-    il2cpp::{GcHandles, Il2cpp, Inventory},
     registry::RudroidModuleEvent,
     ModuleKind,
 };
+use rudroid_unity_common::il2cpp::{GcHandles, Il2cpp, Inventory};
 use std::{
     ffi::{c_void, CStr, CString},
     sync::{
@@ -46,6 +46,7 @@ const REQUIRED_EXPORTS: &[&str] = &[
     "il2cpp_method_get_param_count",
     "il2cpp_method_get_param",
     "il2cpp_type_get_type",
+    "il2cpp_type_is_byref",
     "il2cpp_method_get_return_type",
     "il2cpp_class_from_type",
     "il2cpp_string_length",
@@ -85,10 +86,10 @@ unsafe fn lookup(
     if !found.is_null() || !unsafe { api.string_eq(name, MISSING) } {
         return found;
     }
-    let fallback = api.string_new(c"Sprites/Default");
-    if fallback.is_null() {
+    // SAFETY: this managed hook is running on the attached calling thread.
+    let Some(fallback) = (unsafe { api.new_string(c"Sprites/Default") }) else {
         return found;
-    }
+    };
     // SAFETY: the string just allocated is live on this hook's stack.
     let Some(root) = (unsafe { handles.root(fallback) }) else {
         return found;
@@ -199,8 +200,8 @@ unsafe fn install(host: &HostApiV0, module: usize) -> Result<(), &'static CStr> 
         .ok_or("Application metadata unavailable")
         .and_then(|application| il2cpp.unity_version(application))
         .map_err(|_| c"Unity version query unavailable; patch not installed")?;
-    let abi = match rudroid_common::il2cpp_abi::require_gc_handle_abi(&version) {
-        Ok(abi @ rudroid_common::il2cpp_abi::GcHandleAbi::PointerWidth) => abi,
+    let abi = match rudroid_unity_common::il2cpp_abi::require_gc_handle_abi(&version) {
+        Ok(abi @ rudroid_unity_common::il2cpp_abi::GcHandleAbi::PointerWidth) => abi,
         result => {
             let reason = result.err().unwrap_or_else(|| {
                 format!("shader patch requires pointer-width GC handles: {version}")
@@ -223,7 +224,9 @@ unsafe fn install(host: &HostApiV0, module: usize) -> Result<(), &'static CStr> 
     let (Some(parameter), Some(return_type)) = (parameter, return_type) else {
         return Err(c"Shader.Find native ABI mismatch; patch not installed");
     };
-    if il2cpp.type_kind(parameter) != Some(rudroid_common::il2cpp::TYPE_STRING)
+    if il2cpp.type_kind(parameter) != Some(rudroid_unity_common::il2cpp::TYPE_STRING)
+        || il2cpp.type_byref(parameter) != Some(false)
+        || il2cpp.type_byref(return_type) != Some(false)
         || il2cpp.class_from_type(return_type) != Some(shader)
     {
         return Err(c"Shader.Find native ABI mismatch; patch not installed");

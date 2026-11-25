@@ -27,7 +27,78 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use crate::jni_abi::{function_slot, JValue, NativeMethod};
+/// Borrowed JNI native registration table. The session copies names and
+/// signatures; plugin and guest function addresses stay process-pinned.
+#[repr(C)]
+pub struct NativeMethod {
+    pub name: *const c_char,
+    pub signature: *const c_char,
+    pub fn_ptr: *mut c_void,
+}
+
+/// Declare metadata supplied by a trusted capability. This differs from a
+/// guest FindClass query, which must not create absent application classes.
+pub fn declare_class(env: JniEnv, name: &CStr) -> JObject {
+    let types = env.find_class(c"org/rudroid/runtime/TypeRegistry");
+    let method = env.static_method(types, c"declareClass", c"(Ljava/lang/String;)Ljava/lang/Class;");
+    let text = env.new_string_utf(name);
+    let class = if let Some(method) = method.filter(|_| !text.is_null()) {
+        env.call_static_object(types, method, &[Arg::object(text)])
+    } else { std::ptr::null_mut() };
+    env.delete_local_ref(text);
+    env.delete_local_ref(types);
+    class
+}
+
+
+/// Read function-pointer slot `index` of the table behind a JNI handle and
+/// return it as `T` (an `unsafe extern "C" fn` of the slot's signature).
+///
+/// Panics when the handle, its table pointer or the slot itself is null — a
+/// broken session table is a hard bring-up error, never a silent miss.
+///
+/// # Safety
+/// `handle` must be null or a live `JavaVM*`/`JNIEnv*` whose first field
+/// points at a function table with at least `index + 1` entries, and slot
+/// `index` must hold a function of exactly `T`'s signature. `T` must be
+/// pointer-sized.
+pub unsafe fn function_slot<T: Copy>(handle: *const c_void, index: usize) -> T {
+    assert_eq!(
+        std::mem::size_of::<T>(),
+        std::mem::size_of::<usize>(),
+        "JNI slots hold pointer-sized function pointers"
+    );
+    assert!(
+        !handle.is_null(),
+        "JNI handle is null — the session handed out a broken JavaVM/JNIEnv"
+    );
+    // SAFETY: caller guarantees a live handle whose first field is the
+    // function-table pointer.
+    let functions = unsafe { *(handle as *const *const usize) };
+    assert!(!functions.is_null(), "JNI function table pointer is null");
+    // SAFETY: caller guarantees the table holds at least `index + 1` slots.
+    let entry = unsafe { *functions.add(index) };
+    assert!(entry != 0, "JNI slot {index} is null in the session table");
+    // SAFETY: caller guarantees the slot holds exactly `T`; sizes match.
+    unsafe { std::mem::transmute_copy::<usize, T>(&entry) }
+}
+
+
+/// JNI's scalar argument union. A call's method descriptor determines which
+/// member is read; references remain owned by the shared JNI session.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union JValue {
+    pub z: u8,
+    pub b: i8,
+    pub c: u16,
+    pub s: i16,
+    pub i: i32,
+    pub j: i64,
+    pub f: f32,
+    pub d: f64,
+    pub l: *mut c_void,
+}
 
 /// `jobject`, `jclass`, `jstring`, `jarray`, `jthrowable`, `jweak`.
 pub type JObject = *mut c_void;
@@ -994,9 +1065,10 @@ impl JniEnv {
         call!(self, REGISTER_NATIVES, fn(JObject, *const Native, i32) -> i32, class, natives.as_ptr(), count)
     }
 
-    /// `FindClass(name)` then [`Self::register`]; -1 when the class is missing.
+    /// Explicitly declare the capability's class, then register its natives.
+    /// Guest class queries remain separate from this trusted provider action.
     pub fn register_class(self, name: &CStr, natives: &[Native]) -> i32 {
-        let class = self.find_class(name);
+        let class = declare_class(self, name);
         if class.is_null() {
             return -1;
         }

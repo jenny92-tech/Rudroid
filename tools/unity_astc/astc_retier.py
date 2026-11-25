@@ -1,5 +1,5 @@
 # INPUT:  UnityFS bundle, target profile, UnityPy, Pillow and shared texture policy
-# OUTPUT:  prepare_bundle(); validated bundle and compact conversion summary
+# OUTPUT:  scan_font_references(), prepare_bundle(); metadata keys and validated conversion
 # POS:    automatically chooses smaller quality-passing texture payloads without runtime work
 # SPDX-License-Identifier: LicenseRef-Rudroid-NC-SourceShare-1.0
 # Copyright (c) 2025-2026 jenny92-tech <jennyliu90223@gmail.com>
@@ -18,6 +18,7 @@ from UnityPy.streams import EndianBinaryReader
 
 from .image_encode import append_mips
 from .profiles import TARGETS
+from .resource_refs import internal_resource_name, resource_basename
 from .texture_policy import DESKTOP_COLOR_FORMATS, astc_block_of, astc_bytes, image_passes, keep_reason
 
 STREAM_FIELDS = {
@@ -39,22 +40,123 @@ def _stream_ref(data, field):
     return (path, offset, size) if size else None
 
 
-def collect_font_textures(env):
-    keys = set()
-    for obj in env.objects:
-        if obj.type.name != "Font":
-            continue
-        data = obj.read()
-        texture = getattr(data, "m_Texture", None)
-        pid = getattr(texture, "path_id", 0) or getattr(texture, "m_PathID", 0)
+def _field(data, name, default=None):
+    return data.get(name, default) if isinstance(data, dict) else getattr(data, name, default)
+
+
+def _font_metadata(env):
+    """Extract stable font roots/material edges without loading external files."""
+    objects = list(env.objects)
+    index, checked_owners = {}, set()
+    for obj in objects:
+        owner = resource_basename(obj.assets_file.name).lower()
+        if owner not in checked_owners:
+            internal_resource_name(getattr(env, "file", None), obj.assets_file.name)
+            checked_owners.add(owner)
+        key = (owner, obj.path_id)
+        if key in index:
+            raise ValueError("ambiguous font object owner")
+        index[key] = obj
+
+    def pointer_key(pointer, owner):
+        pid = _field(pointer, "m_PathID", _field(pointer, "path_id", 0))
         if not pid:
-            continue
-        fid = getattr(texture, "file_id", 0) or getattr(texture, "m_FileID", 0)
-        if fid < 0 or fid > len(getattr(obj.assets_file, "externals", [])):
+            return None
+        fid = _field(pointer, "m_FileID", _field(pointer, "file_id", 0))
+        externals = getattr(owner, "externals", [])
+        if fid < 0 or fid > len(externals):
             raise ValueError("invalid font texture owner")
-        owner = obj.assets_file.name if fid == 0 else obj.assets_file.externals[fid - 1].path
-        keys.add((ntpath.basename(owner), pid))
+        name = owner.name if fid == 0 else externals[fid - 1].path
+        # Resolve only already-loaded objects: do not follow arbitrary external
+        # filesystem paths or guess a same-PathID object in another assets file.
+        return resource_basename(name).lower(), pid
+
+    def deref(pointer, owner):
+        return index.get(pointer_key(pointer, owner))
+
+    roots, materials = set(), {}
+
+    def add_root(pointer, owner):
+        key = pointer_key(pointer, owner)
+        if key is not None:
+            roots.add(key)
+
+    for obj in objects:
+        if obj.type.name == "Font":
+            data = obj.read()
+            add_root(_field(data, "m_Texture"), obj.assets_file)
+            add_root(_field(data, "m_DefaultMaterial"), obj.assets_file)
+        elif obj.type.name == "Material":
+            properties = _field(obj.read(), "m_SavedProperties")
+            slots = _field(properties, "m_TexEnvs", [])
+            edges = set()
+            for _, slot in slots.items() if isinstance(slots, dict) else slots:
+                key = pointer_key(_field(slot, "m_Texture"), obj.assets_file)
+                if key is not None:
+                    edges.add(key)
+            materials[(resource_basename(obj.assets_file.name).lower(), obj.path_id)] = edges
+        elif obj.type.name == "MonoBehaviour":
+            try:
+                data = obj.read_typetree()
+            except (ValueError, TypeError, KeyError, AttributeError, IndexError):
+                # An opaque unrelated script must not disable conversion for a
+                # whole bundle. No custom-font coverage is inferred without its
+                # serialized fields; sensitive texture names remain a fallback.
+                continue
+            modern = "m_AtlasTextures" in data and any(
+                name in data for name in ("m_GlyphTable", "m_CharacterTable", "m_FaceInfo"))
+            legacy = "m_glyphInfoList" in data and any(name in data for name in ("atlas", "m_atlas"))
+            script = deref(data.get("m_Script"), obj.assets_file)
+            font_script = (script is not None and script.type.name == "MonoScript"
+                           and "font" in str(_field(script.read(), "m_ClassName", "")).casefold())
+            if not (modern or legacy or font_script):
+                continue
+            for field in ("m_AtlasTextures", "atlasTextures"):
+                for pointer in data.get(field, []) or []:
+                    add_root(pointer, obj.assets_file)
+            for field in ("atlas", "m_atlas", "m_AtlasTexture", "atlasTexture", "m_Texture",
+                          "m_Material", "m_DefaultMaterial", "material"):
+                add_root(data.get(field), obj.assets_file)
+    return roots, materials, index
+
+
+def collect_font_textures(env, protected_fonts=()):
+    """Follow only font roots; an unrelated material/atlas never becomes a root."""
+    roots, materials, index = _font_metadata(env)
+    pending = list(roots | {(resource_basename(owner).lower(), pid) for owner, pid in protected_fonts})
+    keys, visited = set(), set()
+    while pending:
+        key = pending.pop()
+        if key in visited:
+            continue
+        visited.add(key)
+        if key in materials:
+            pending.extend(materials[key])
+            continue
+        target = index.get(key)
+        if target is None:
+            keys.add(key)
+        elif target.type.name == "Texture2D":
+            keys.add((resource_basename(target.assets_file.name), target.path_id))
     return keys
+
+
+def scan_font_references(path):
+    """Return only JSON metadata for the parent's complete-tree font closure.
+
+    Keys are lowercase owner basename + PathID, matching UnityPy pointer lookup.
+    Roots retain both font atlas and material pointers; material edges alone do
+    not confer protection. The parent closes the graph across bundles before
+    starting any conversion worker. No UnityPy objects escape this process.
+    """
+    env = UnityPy.load(str(path))
+    if getattr(env.file, "signature", None) != "UnityFS":
+        raise ValueError(f"not a UnityFS bundle: {path}")
+    roots, materials, _ = _font_metadata(env)
+    return {"roots": [list(key) for key in sorted(roots)],
+            "materials": [{"owner": owner, "path_id": pid,
+                           "textures": [list(key) for key in sorted(edges)]}
+                          for (owner, pid), edges in sorted(materials.items())]}
 
 
 def check_streams(env, bundle):
@@ -68,11 +170,16 @@ def check_streams(env, bundle):
         if ref is None:
             continue
         path, offset, size = ref
-        name = ntpath.basename(path)
-        if name in ("", ".", "..") or offset < 0 or size < 0:
+        name = resource_basename(path)
+        if offset < 0 or size < 0:
             raise ValueError(f"invalid stream reference in {bundle.name}: {path}")
+        internal = internal_resource_name(getattr(env, "file", None), path)
         reader = env.get_cab(name)
+        if internal is not None and reader is not env.file.files[internal]:
+            raise ValueError(f"ambiguous resource registry owner: {path!r}")
         if reader is not None:
+            if not isinstance(reader, EndianBinaryReader):
+                raise ValueError(f"stream does not reference raw resource bytes: {path!r}")
             length = reader.Length
         else:
             resource = bundle.parent / name
@@ -136,7 +243,7 @@ def _stream_target(bundle, texture):
     ref = _stream_ref(texture, "m_StreamData")
     if ref is None or texture.image_data:
         return None
-    name = ntpath.basename(ref[0])
+    name = internal_resource_name(bundle, ref[0])
     return name if isinstance(bundle.files.get(name), EndianBinaryReader) else None
 
 
@@ -164,8 +271,9 @@ def _save_preserving_layout(bundle, patches, streams):
     return bundle.save(packer="original")
 
 
-def prepare_bundle(source, output, target):
+def prepare_bundle(source, output, target, protected_fonts=()):
     source, output = Path(source), Path(output)
+    protected_fonts = tuple(protected_fonts)
     if target not in TARGETS:
         raise ValueError(f"unknown target: {target}")
     env = UnityPy.load(str(source))
@@ -173,7 +281,8 @@ def prepare_bundle(source, output, target):
         raise ValueError(f"not a UnityFS bundle: {source}")
     textures = []
     try:
-        fonts = collect_font_textures(env)
+        fonts = {(resource_basename(owner).lower(), pid)
+                 for owner, pid in collect_font_textures(env, protected_fonts)}
         for obj in env.objects:
             if obj.type.name == "Texture2D":
                 texture = obj.read()
@@ -221,7 +330,7 @@ def prepare_bundle(source, output, target):
         del env, textures, obj, texture, converted, patches, streams, data, payload, replacement
         gc.collect()
         from .validate_output import validate
-        validate(source, output, changed)
+        validate(source, output, changed, protected_fonts)
     else:
         shutil.copyfile(source, output)
     return {"textures": sum(reasons.values()), "changed": len(changed), "decisions": dict(reasons),

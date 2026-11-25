@@ -2,7 +2,9 @@
 //! OUTPUT:  `tests` unit tests, compiled into the crate only under cfg(test)
 //! POS:    keeps test bodies out of `src/lib.rs`; declared there with `#[path]`
 use super::*;
-use rudroid_common::registry::RUDROID_UNITY_PROFILE_NONE;
+use rudroid_unity_common::{
+    RUDROID_UNITY_PROFILE_INIT_JNI_INT_ARG, RUDROID_UNITY_PROFILE_NONE,
+};
 
 const CONTEXT_SPEC: Spec = Spec {
     id: "unity_test",
@@ -85,5 +87,5 @@ fn render_sleep_clamp_matches_the_reference_policy() {
 
 #[test]
 fn registration_contract_names_its_requirements() {
-    assert_eq!(HOST_API_VERSION, 4);
+    assert_eq!(HOST_API_VERSION, 7);
 }

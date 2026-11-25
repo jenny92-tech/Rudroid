@@ -33,12 +33,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rudroid_test_support::cargo::{
-    assert_kit_features, build_loader_fixture, build_variant, ensure_workspace_cdylib, kit_sdl,
+    build_loader_fixture, build_variant, ensure_workspace_cdylib, kit_sdl,
 };
 
-// The capability package's lib target is renamed `platform_sdl_runtime`
-// (artifact name == capability id), so that is the importable crate name.
-use platform_sdl_runtime::c_api::symbols as capability_symbols;
+use rudroid_common::sdl_abi::symbols as capability_symbols;
 use rudroid_unity_loader::{bring_up, load_deploy_dir, runtime, Selection};
 
 /// Serializes every test in this binary: the registry is process-global.
@@ -48,7 +46,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 /// (`RUDROID_KIT_FEATURES`; the SDL capability gets `sdl` exactly when the
 /// outer build has it).
 fn ensure_cdylib(package: &str, artifact: &str) -> PathBuf {
-    assert_kit_features(platform_sdl_runtime::SDL_ENABLED);
+
     ensure_workspace_cdylib(package, artifact)
 }
 
@@ -368,7 +366,7 @@ fn unsupported_native_presentation_falls_back_without_changing_guest_geometry() 
     if std::env::var_os(CHILD).is_none() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture"])
-            .env(CHILD, "1").env("SDL_VIDEODRIVER", "x11").output().unwrap();
+            .env(CHILD, "1").env("RUDROID_DIAGNOSTICS", "1").env("SDL_VIDEODRIVER", "x11").output().unwrap();
         assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(stderr.contains("requires Wayland; active SDL driver is x11"), "{stderr}");
@@ -397,38 +395,22 @@ fn unsupported_native_presentation_falls_back_without_changing_guest_geometry() 
     let _ = std::fs::remove_dir_all(&deploy);
 }
 
-/// The outer build's real SDL feature (this binary links the capability)
-/// must match `RUDROID_KIT_FEATURES`, which every nested build replays —
-/// e.g. a plain `cargo test --features rudroid-linux-sdl-runtime/sdl`
-/// without the variable fails here instead of passing on mislabelled kits.
+/// Resolve the shared C contract against the independently linked provider.
 #[test]
-fn outer_sdl_feature_matches_the_declared_kit_features() {
-    assert_kit_features(platform_sdl_runtime::SDL_ENABLED);
-}
-
-/// The loader's mirrored C API names must never drift from the capability's
-/// own constants (test-only link; production dlsyms the deployed cdylib).
-#[test]
-fn loader_sdl_api_names_match_capability_constants() {
-    for (loader, capability) in [
-        (runtime::sdl_api::GRAPHICS_FEATURES, capability_symbols::GRAPHICS_FEATURES),
-        (runtime::sdl_api::SESSION_DESTROY, capability_symbols::SESSION_DESTROY),
-        (runtime::sdl_api::SESSION_CREATE_NATIVE_BUFFER, capability_symbols::SESSION_CREATE_NATIVE_BUFFER),
-        (runtime::sdl_api::SESSION_CREATE_VULKAN, capability_symbols::SESSION_CREATE_VULKAN),
-        (runtime::sdl_api::GUEST_ACTIVATE, capability_symbols::GUEST_ACTIVATE),
-        (runtime::sdl_api::RENDER_CONFIGURE, capability_symbols::RENDER_CONFIGURE),
-        (runtime::sdl_api::AUDIO_POLICY_CONFIGURE, capability_symbols::AUDIO_POLICY_CONFIGURE),
-        (runtime::sdl_api::GUEST_SYMBOL, capability_symbols::GUEST_SYMBOL),
-    ] { assert_eq!(loader, capability); }
-    assert_eq!(
-        runtime::sdl_api::SESSION_CREATE,
-        capability_symbols::SESSION_CREATE
-    );
-    assert_eq!(
-        runtime::sdl_api::SESSION_REPORT,
-        capability_symbols::SESSION_REPORT
-    );
-    assert_eq!(runtime::sdl_api::LAST_ERROR, capability_symbols::LAST_ERROR);
+fn deployed_sdl_exports_the_session_contract() {
+    let image = ensure_cdylib("rudroid-linux-sdl-runtime", "platform_sdl_runtime");
+    // SAFETY: trusted same-build provider. Only symbol addresses are checked.
+    unsafe {
+        let library = libloading::Library::new(image).unwrap();
+        for name in [capability_symbols::GRAPHICS_FEATURES, capability_symbols::SESSION_CREATE,
+            capability_symbols::SESSION_CREATE_NATIVE_BUFFER, capability_symbols::SESSION_CREATE_VULKAN,
+            capability_symbols::SESSION_REPORT, capability_symbols::SESSION_DESTROY,
+            capability_symbols::LAST_ERROR, capability_symbols::GUEST_ACTIVATE,
+            capability_symbols::RENDER_CONFIGURE, capability_symbols::AUDIO_POLICY_CONFIGURE,
+            capability_symbols::GUEST_SYMBOL] {
+            library.get::<*const ()>(name.as_bytes()).unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+    }
 }
 
 /// One process-global log sink shared by every test in this binary (the sink

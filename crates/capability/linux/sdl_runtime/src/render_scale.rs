@@ -148,6 +148,12 @@ impl RenderScale {
                     source=(gl.uniform)(objects.program,c"u_source".as_ptr());texel=(gl.uniform)(objects.program,c"u_texel".as_ptr());
                     (gl.gen_vao)(1,&mut objects.vao);
                     if source<0 || texel<0 || objects.vao==0 {return Err("scaled presentation uniforms/VAO unavailable".into());}
+                    let mut saved_program = 0;
+                    (gl.get)(0x8b8d, &mut saved_program);
+                    (gl.use_program)(objects.program);
+                    (gl.uniform1i)(source, 0);
+                    (gl.uniform2f)(texel, 1.0 / size.width as f32, 1.0 / size.height as f32);
+                    (gl.use_program)(saved_program as u32);
                 }
                 let error=(gl.error)();if error!=0 {return Err(format!("scaled initialization GL error {error:#x}"));}
                 Ok(())
@@ -207,7 +213,15 @@ impl RenderScale {
             if self.size.sharp {self.present_sharp();} else {
                 let scissor=(gl.enabled)(0x0c11);(gl.disable)(0x0c11);
                 (gl.bind)(READ,self.objects.framebuffer);(gl.bind)(DRAW,0);
+                let mut saved_read_buf = 0;
+                (gl.get)(0x0c02, &mut saved_read_buf);
+                if saved_read_buf as u32 != COLOR {
+                    (gl.read_buffer)(COLOR);
+                }
                 (gl.blit)(0,0,self.size.width,self.size.height,0,0,self.size.output_width,self.size.output_height,0x4000,0x2601);
+                if saved_read_buf as u32 != COLOR {
+                    (gl.read_buffer)(saved_read_buf as u32);
+                }
                 if scissor!=0 {(gl.enable)(0x0c11);}
             }
             (gl.bind)(DRAW,saved[0] as u32);
@@ -232,7 +246,8 @@ impl RenderScale {
             let mut texture=0;let mut sampler=0;(gl.get)(0x8069,&mut texture);(gl.get)(0x8919,&mut sampler);
             if sampler!=0 {(gl.bind_sampler)(0,0);}
             (gl.bind_texture)(TEXTURE,self.objects.texture);
-            (gl.uniform1i)(self.source,0);(gl.uniform2f)(self.texel,1.0/self.size.width as f32,1.0/self.size.height as f32);(gl.draw)(4,0,3);
+            let _ = (self.source, self.texel);
+            (gl.draw)(4,0,3);
             (gl.bind_texture)(TEXTURE,texture as u32);
             if sampler!=0 {(gl.bind_sampler)(0,sampler as u32);}
             if saved[1]!=0x84c0 {(gl.active_texture)(saved[1] as u32);}

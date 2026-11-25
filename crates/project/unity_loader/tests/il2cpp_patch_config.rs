@@ -67,9 +67,9 @@ argc = "not-a-number"
 extra_probe = "Sym_Extra"
 "#;
 
-/// What the probe must observe through the Host API v0 getters: every value
+/// What the probe must observe through the Host API getters: every value
 /// matches the source TOML above, misses/type errors keep the probe's
-/// fallback, and `config_set_string` stays an explicit v0 failure.
+/// fallback, and `config_set_string` refuses arbitrary user-config writes.
 const EXPECTED_PROBE_LINES: &[&str] = &[
     "size=2",
     "p0.class=PlayerState ret=1",
@@ -114,6 +114,7 @@ fn legacy_patch_config_reaches_hook_providers_through_cli() {
     std::fs::write(&config_path, CONFIG).unwrap();
 
     let output = Command::new(BIN)
+        .env("RUDROID_DIAGNOSTICS", "1")
         .arg(&dir)
         .arg("--config")
         .arg(&config_path)

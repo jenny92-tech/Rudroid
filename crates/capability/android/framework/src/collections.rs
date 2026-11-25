@@ -98,14 +98,9 @@ extern "C" fn key(env: JniEnv, entry: JObject) -> JObject {
 extern "C" fn value(env: JniEnv, entry: JObject) -> JObject {
     env.get_object_field(entry, field(env, entry, c"value", c"Ljava/lang/Object;"))
 }
-extern "C" fn int_value(env: JniEnv, object: JObject) -> i32 {
-    env.get_int_field(object, field(env, object, c"value", c"I"))
-}
 extern "C" fn float_value(env: JniEnv, object: JObject) -> f32 {
     env.get_float_field(object, field(env, object, c"value", c"F"))
 }
-extern "C" fn long_value(env:JniEnv,object:JObject)->i64 {env.get_long_field(object,field(env,object,c"value",c"J"))}
-extern "C" fn boolean_value(env:JniEnv,object:JObject)->u8 {env.get_boolean_field(object,field(env,object,c"value",c"Z"))}
 fn boxed(env: JniEnv, section: &str, value: &Value) -> *mut c_void {
     let (class, descriptor) = match section {
         "ints" => (c"java/lang/Integer", c"I"),
@@ -211,10 +206,7 @@ pub(super) fn register(env: JniEnv) -> i32 {
         (ITER, c"index", c"I"),
         (ENTRY, c"key", c"Ljava/lang/String;"),
         (ENTRY, c"value", c"Ljava/lang/Object;"),
-        (c"java/lang/Integer", c"value", c"I"),
         (c"java/lang/Float", c"value", c"F"),
-        (c"java/lang/Long", c"value", c"J"),
-        (c"java/lang/Boolean", c"value", c"Z"),
     ] {
         if declare_field(env, class, name, sig, false) != 0 {
             return -1;
@@ -261,15 +253,9 @@ pub(super) fn register(env: JniEnv) -> i32 {
             ],
         ),
         (
-            c"java/lang/Integer",
-            vec![Native::new0(c"intValue", c"()I", int_value)],
-        ),
-        (
             c"java/lang/Float",
             vec![Native::new0(c"floatValue", c"()F", float_value)],
         ),
-        (c"java/lang/Long",vec![Native::new0(c"longValue",c"()J",long_value)]),
-        (c"java/lang/Boolean",vec![Native::new0(c"booleanValue",c"()Z",boolean_value)]),
     ] {
         if env.register_class(class, &methods) != 0 {
             return -1;

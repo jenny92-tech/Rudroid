@@ -8,6 +8,9 @@ use rudroid_common::jni_env::{Arg, JObject, JniEnv, Native};
 
 static PACKAGE: OnceLock<usize> = OnceLock::new();
 static CODE_PATH: OnceLock<usize> = OnceLock::new();
+/// The one advertised Android API level. `Build.VERSION.SDK` is derived from
+/// this value so a configuration override cannot contradict `SDK_INT`.
+const ANDROID_SDK_INT: i32 = 26;
 
 /// Config string at `key` through a 4 KiB buffer, `fallback` when absent.
 fn configured(host: &rudroid_common::host_api::HostApiV0, key: &CStr, fallback: &CStr) -> String {
@@ -65,8 +68,33 @@ extern "C" fn class_loader(env: JniEnv, context: JObject) -> JObject {
 }
 
 extern "C" fn application_context(env: JniEnv, _context: JObject) -> JObject {
-    static APPLICATION: OnceLock<usize> = OnceLock::new();
-    singleton(env, &APPLICATION, || allocate(env, c"android/app/Application"))
+    super::application::current(env)
+}
+/// Bounded process-ActivityThread identity (a facade, not an Android runtime):
+/// only the three accessors below exist, so an SDK native that asks for the
+/// activity thread reaches the ONE Application the shared VM already advertises
+/// through `Context.getApplicationContext`. Identity must match: a second
+/// Application copy would give the guest two contexts whose preferences,
+/// directories and package info are separately cached, which is a silent
+/// divergence rather than an unavailable service.
+///
+/// Every other ActivityThread member (`mBoundApplication`,
+/// `mInitialApplication`, `getSystemContext`, `currentActivityClientRecord`,
+/// activity/proc/thread-scheduler bookkeeping) stays unregistered and
+/// therefore explicitly unavailable: the VM answers a method miss with
+/// `NoSuchMethodError`, never a fabricated value, and no zygote, activity
+/// stack or thread scheduler is implied here.
+extern "C" fn activity_thread(env: JniEnv, _class: JObject) -> JObject {
+    static ACTIVITY_THREAD: OnceLock<usize> = OnceLock::new();
+    singleton(env, &ACTIVITY_THREAD, || allocate(env, c"android/app/ActivityThread"))
+}
+
+/// The Application of this process. `receiver` is the `this`/`class` the VM
+/// supplies (an ActivityThread instance from [`activity_thread`] or its class
+/// for the static form); the accessor ignores it deliberately, so all three
+/// entry points return the same rooted object as `getApplicationContext`.
+extern "C" fn application_of(_env: JniEnv, _receiver: JObject) -> JObject {
+    application_context(_env, _receiver)
 }
 
 // The host owns scheduling policy; this matches the reference Android mock.
@@ -92,7 +120,20 @@ pub(super) fn register(env: JniEnv) -> i32 {
     for handle in [parent, child, types] { env.delete_local_ref(handle); }
     rudroid_common::jni_abi::declare_superclass(env, c"android/app/Application", c"android/content/Context");
     if env.exception_check() { return -1; }
+    if super::application::register(env) != 0 { return -1; }
+    // Only these three accessors are advertised; the rest of the Android
+    // ActivityThread surface is intentionally absent.
+    let thread_surface = [
+        Native::new0(c"currentActivityThread", c"()Landroid/app/ActivityThread;", activity_thread),
+        Native::new0(c"currentApplication", c"()Landroid/app/Application;", application_of),
+        Native::new0(c"getApplication", c"()Landroid/app/Application;", application_of),
+    ];
+    if env.register_class(c"android/app/ActivityThread", &thread_surface) != 0 { return -1; }
     let status=register_services(env);
+    if status!=0 { return status; }
+    let status=super::intent_extras::register(env);
+    if status!=0 {return status;}
+    let status=super::intent_filter::register(env);
     if status==0 { super::statfs::register(env) } else { status }
 }
 
@@ -101,6 +142,16 @@ static ASSETS: OnceLock<usize> = OnceLock::new();
 static PACKAGE_MANAGER: OnceLock<usize> = OnceLock::new();
 static INTENT: OnceLock<usize> = OnceLock::new();
 static UI_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+static UI_DIAGNOSTIC_RECORDS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+fn trace_ui(event: &str, present: bool, creator: bool) {
+    use std::sync::atomic::Ordering;
+    if rudroid_common::logging::diagnostics_enabled()
+        && UI_DIAGNOSTIC_RECORDS.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+            |n| (n < 16).then_some(n + 1)).is_ok()
+    {
+        rudroid_common::diagnostic!("[Framework] UI dispatch: event={event} runnable_present={present} creator_thread={creator}");
+    }
+}
 struct UiJob {handle:usize,deadline:Option<std::time::Instant>}
 struct UiQueue {jobs:std::collections::VecDeque<UiJob>,closed:bool,finished:bool}
 static UI_JOBS: std::sync::Mutex<UiQueue> = std::sync::Mutex::new(UiQueue{jobs:std::collections::VecDeque::new(),closed:false,finished:false});
@@ -113,22 +164,24 @@ pub(super) fn config_string(env: JniEnv, key: &CStr, fallback: &CStr, canonical:
     } else { None };
     super::preferences::string(env,path.as_deref().unwrap_or(&value))
 }
-pub(super) fn allocate(env: JniEnv, name: &CStr) -> *mut c_void {
-    let class = env.find_class(name); let object = env.alloc_object(class); env.delete_local_ref(class); object
-}
-pub(super) fn set_string_field(env: JniEnv, object: *mut c_void, name: &CStr, string: *mut c_void) {
-    let class = env.get_object_class(object); let field = env.get_field_id(class,name,c"Ljava/lang/String;");
-    env.set_object_field(object,field,string); env.delete_local_ref(class); env.delete_local_ref(string);
-}
-pub(super) fn singleton(env: JniEnv, cache: &OnceLock<usize>, create: impl FnOnce()->*mut c_void) -> *mut c_void {
-    let global = *cache.get_or_init(|| {
-        let object = create();
-        if object.is_null() { return 0; }
-        let result = env.new_global_ref(object); env.delete_local_ref(object); result as usize
-    });
-    if global == 0 { std::ptr::null_mut() } else { env.new_local_ref(global as *mut c_void) }
-}
+pub(super) use crate::jni_helpers::{allocate, set_string_field, singleton};
 extern "C" fn application_info(env: JniEnv, _context: JObject) -> JObject {
+    // APK declarations are independent of the runtime's advertised API.
+    // Validate before the singleton: a failed config must not cache a quiet
+    // null after the caller clears its first exception and asks again.
+    let host=super::HOST.get().unwrap();
+    let min=host.config_i64(c"package.minSdkVersion",23);
+    let target=host.config_i64(c"package.targetSdkVersion",26);
+    let (Ok(min),Ok(target))=(i32::try_from(min),i32::try_from(target)) else {
+        let error=env.find_class(c"java/lang/IllegalArgumentException");
+        env.throw_new(error,c"APK SDK declarations exceed Java int range");
+        env.delete_local_ref(error);return std::ptr::null_mut();
+    };
+    if min<1 || target<1 {
+        let error=env.find_class(c"java/lang/IllegalArgumentException");
+        env.throw_new(error,c"APK SDK declarations must be positive");
+        env.delete_local_ref(error);return std::ptr::null_mut();
+    }
     singleton(env,&APPLICATION_INFO,|| {
         let object = allocate(env,c"android/content/pm/ApplicationInfo");
         for (name,key,default,canonical) in [
@@ -138,12 +191,17 @@ extern "C" fn application_info(env: JniEnv, _context: JObject) -> JObject {
         ] { set_string_field(env,object,name,config_string(env,key,default,canonical)); }
         set_string_field(env,object,c"sourceDir",base_package(env,std::ptr::null_mut()));
         set_string_field(env,object,c"publicSourceDir",base_package(env,std::ptr::null_mut()));
-        let class=env.get_object_class(object);env.set_int_field(object,env.get_field_id(class,c"minSdkVersion",c"I"),23);env.set_int_field(object,env.get_field_id(class,c"targetSdkVersion",c"I"),26);
+        let class=env.get_object_class(object);
+        env.set_int_field(object,env.get_field_id(class,c"minSdkVersion",c"I"),min);
+        env.set_int_field(object,env.get_field_id(class,c"targetSdkVersion",c"I"),target);
         let splits=split_packages(env);
         for name in [c"splitSourceDirs",c"splitPublicSourceDirs"] {
             env.set_object_field(object,env.get_field_id(class,name,c"[Ljava/lang/String;"),splits);
         }
         env.delete_local_ref(splits);env.delete_local_ref(class);
+        if !env.exception_check() {
+            rudroid_common::diagnostic!("[Framework] ApplicationInfo SDK declarations: min={min} target={target} runtime_api={ANDROID_SDK_INT}");
+        }
         object
     })
 }
@@ -159,6 +217,7 @@ extern "C" fn intent(env: JniEnv, _activity: JObject) -> JObject {
         let action = env.new_string_utf(c"android.intent.action.MAIN");
         intent_init(env,object,action);
         env.delete_local_ref(action);
+        super::intent_extras::initialize_launcher(env,object);
         object
     })
 }
@@ -167,8 +226,27 @@ extern "C" fn intent_init(env:JniEnv,object:JObject,action:JObject) {
     env.set_object_field(object,env.get_field_id(class,c"action",c"Ljava/lang/String;"),action);
     env.delete_local_ref(class);
 }
+/// Android's zero-argument `Intent()` performs no initialization beyond
+/// ordinary fresh-object defaults, so the shared VM's fresh field defaults
+/// (null `action`/`package`/`categories`, zero `flags`) already ARE that
+/// constructor; this callback exists only so the `<init>` lookup succeeds and
+/// never writes a field or re-initializes another Intent owner.
+///
+/// It deliberately does not imply `ACTION_MAIN`: the launcher Intent that
+/// `Activity.getIntent` advertises stays its own distinct rooted singleton, so
+/// an SDK that builds its own `new Intent()` observes an empty Intent rather
+/// than a copy of, or a reset of, that singleton.
+extern "C" fn intent_init_empty(_env: JniEnv, _object: JObject) {}
 extern "C" fn intent_action(env:JniEnv,object:JObject)->JObject {
     intent_string_field(env,object,c"action")
+}
+/// Android's `Intent.setAction(String)`: assigns the same `action` field the
+/// `(String)` constructor uses and returns the receiver, so a fluent chain sees
+/// the very same object (identity, not a copy). A null argument is legal and
+/// clears the action, matching Android's reset-to-empty behavior.
+extern "C" fn intent_set_action(env:JniEnv,object:JObject,action:JObject)->JObject {
+    intent_init(env,object,action);
+    env.new_local_ref(object)
 }
 fn intent_string_field(env:JniEnv,object:JObject,name:&CStr)->JObject {
     let class=env.get_object_class(object);
@@ -247,11 +325,58 @@ extern "C" fn query_activities(env:JniEnv,_manager:JObject,_intent:JObject,_flag
 }
 extern "C" fn null_object(_env: JniEnv, _object: JObject) -> JObject { std::ptr::null_mut() }
 extern "C" fn _null_string_argument(_env: JniEnv, _object: JObject, _key: JObject) -> JObject { std::ptr::null_mut() }
+fn obb_file(env: JniEnv, class: JObject, host: &rudroid_common::host_api::HostApiV0, fallback: bool, index: i32) -> JObject {
+    // The singleton fallback keeps old configs working. Configured OBB roots
+    // may be read-only inputs, so only resolve their paths.
+    let value = if fallback {
+        configured(host, c"paths.android_external_files", c".")
+    } else {
+        let Ok(key) = CString::new(format!("paths.android_obb_dirs.{index}")) else { return std::ptr::null_mut(); };
+        let Some(value) = host.config_string(&key, 4096).filter(|value| !value.is_empty()) else { return std::ptr::null_mut(); };
+        value
+    };
+    let path = absolute(std::path::Path::new(&value));
+    let file = env.alloc_object(class);
+    if !file.is_null() {
+        set_string_field(env, file, c"path", super::preferences::string(env, &path.to_string_lossy()));
+    }
+    if env.exception_check() {
+        env.delete_local_ref(file);
+        return std::ptr::null_mut();
+    }
+    file
+}
+extern "C" fn obb_dir(env: JniEnv, _context: JObject) -> JObject {
+    let Some(host) = super::HOST.get() else { return std::ptr::null_mut(); };
+    let class = env.find_class(c"java/io/File");
+    let file = obb_file(env, class, host, host.config_len(c"paths.android_obb_dirs") == 0, 0);
+    env.delete_local_ref(class);
+    file
+}
 extern "C" fn obb_dirs(env: JniEnv, _context: JObject) -> JObject {
-    let file = allocate(env,c"java/io/File");
-    set_string_field(env,file,c"path",config_string(env,c"paths.android_external_files",c".",true));
-    let class = env.find_class(c"java/io/File"); let result = env.new_object_array(1,class,file);
-    env.delete_local_ref(file); env.delete_local_ref(class); result
+    let Some(host) = super::HOST.get() else { return std::ptr::null_mut(); };
+    let Ok(count) = i32::try_from(host.config_len(c"paths.android_obb_dirs")) else {
+        return std::ptr::null_mut();
+    };
+    let class = env.find_class(c"java/io/File");
+    let length = count.max(1);
+    let array = env.new_object_array(length, class, std::ptr::null_mut());
+    if !array.is_null() {
+        for index in 0..length {
+            let file = obb_file(env, class, host, count == 0, index);
+            if !file.is_null() {
+                env.set_object_array_element(array, index, file);
+                env.delete_local_ref(file);
+            }
+            if env.exception_check() { break; }
+        }
+    }
+    env.delete_local_ref(class);
+    if env.exception_check() {
+        env.delete_local_ref(array);
+        return std::ptr::null_mut();
+    }
+    array
 }
 extern "C" fn file_path(env: JniEnv, object: JObject) -> JObject {
     let class = env.get_object_class(object); let id = env.get_field_id(class,c"path",c"Ljava/lang/String;");
@@ -274,6 +399,7 @@ fn enqueue_ui(env:JniEnv,runnable:*mut c_void,deadline:Option<std::time::Instant
     queue.jobs.push_back(UiJob{handle:root as usize,deadline});1
 }
 extern "C" fn run_on_ui(env: JniEnv, _activity: JObject, runnable: JObject) {
+    trace_ui("runOnUiThread", !runnable.is_null(), UI_THREAD.get().is_some_and(|id| *id == std::thread::current().id()));
     if runnable.is_null(){return;}
     if UI_THREAD.get().is_some_and(|id| *id == std::thread::current().id()) { if !UI_JOBS.lock().unwrap().finished {run(env,runnable);} }
     else {enqueue_ui(env,runnable,Some(std::time::Instant::now()));}
@@ -282,6 +408,7 @@ extern "C" fn run_on_ui(env: JniEnv, _activity: JObject, runnable: JObject) {
 extern "C" fn drain_ui(env: JniEnv, _class: JObject) {
     if !UI_THREAD.get().is_some_and(|id| *id == std::thread::current().id()) { return; }
     let budget=UI_JOBS.lock().unwrap().jobs.len();let now=std::time::Instant::now();
+    if budget != 0 { trace_ui("drain", true, true); }
     for _ in 0..budget {
         let Some(job) = UI_JOBS.lock().unwrap().jobs.pop_front() else { break; };
         if !job.deadline.is_some_and(|deadline|deadline<=now) {UI_JOBS.lock().unwrap().jobs.push_back(job);continue;}
@@ -311,13 +438,16 @@ fn register_services(env: JniEnv) -> i32 {
         (c"android/content/pm/PackageInfo",&[(c"packageName",c"Ljava/lang/String;"),(c"versionName",c"Ljava/lang/String;"),(c"versionCode",c"I"),(c"applicationInfo",c"Landroid/content/pm/ApplicationInfo;")],false),
         (c"java/io/File",&[(c"path",c"Ljava/lang/String;")],false),
         (c"android/os/Environment",&[(c"MEDIA_MOUNTED",c"Ljava/lang/String;")],true),
-        (c"android/os/Build$VERSION",&[(c"SDK_INT",c"I"),(c"RELEASE",c"Ljava/lang/String;"),(c"INCREMENTAL",c"Ljava/lang/String;")],true),
+        (c"android/os/Build$VERSION",&[(c"SDK_INT",c"I"),(c"SDK",c"Ljava/lang/String;"),(c"RELEASE",c"Ljava/lang/String;"),(c"INCREMENTAL",c"Ljava/lang/String;")],true),
         (c"android/os/Build",&[(c"MANUFACTURER",c"Ljava/lang/String;"),(c"MODEL",c"Ljava/lang/String;"),(c"DEVICE",c"Ljava/lang/String;"),(c"ID",c"Ljava/lang/String;")],true),
     ] { for (name,signature) in fields {
         if declare_field(env,class,name,signature,is_static) != 0 { return -1; } } }
     if rudroid_common::jni_abi::declare_superclass(env,c"android/content/pm/ApplicationInfo",c"android/content/pm/PackageItemInfo") != 0 { return -1; }
     let version = env.find_class(c"android/os/Build$VERSION");
-    env.set_static_int_field(version,env.get_static_field_id(version,c"SDK_INT",c"I"),26); env.delete_local_ref(version);
+    env.set_static_int_field(version,env.get_static_field_id(version,c"SDK_INT",c"I"),ANDROID_SDK_INT);
+    let sdk = super::preferences::string(env,&ANDROID_SDK_INT.to_string());
+    env.set_static_object_field(version,env.get_static_field_id(version,c"SDK",c"Ljava/lang/String;"),sdk);
+    env.delete_local_ref(sdk); env.delete_local_ref(version);
     let layout=env.find_class(c"android/view/WindowManager$LayoutParams");env.set_static_int_field(layout,env.get_static_field_id(layout,c"FLAG_KEEP_SCREEN_ON",c"I"),128);env.delete_local_ref(layout);
     for (class,name,key,default) in [
         (c"android/os/Environment",c"MEDIA_MOUNTED",c"android.storage_state",c"mounted"),
@@ -343,22 +473,27 @@ fn register_services(env: JniEnv) -> i32 {
             Native::new0(c"getAssets",c"()Landroid/content/res/AssetManager;",assets),
             Native::new0(c"getPackageManager",c"()Landroid/content/pm/PackageManager;",package_manager),
             Native::new0(c"getApplicationInfo",c"()Landroid/content/pm/ApplicationInfo;",application_info),
+            Native::new0(c"getObbDir",c"()Ljava/io/File;",obb_dir),
             Native::new0(c"getObbDirs",c"()[Ljava/io/File;",obb_dirs),
         ]),
         (c"android/content/pm/PackageManager",vec![Native::new2(c"getPackageInfo",c"(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",package_info),Native::new2(c"getApplicationInfo",c"(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",package_application_info),Native::new2(c"queryIntentActivities",c"(Landroid/content/Intent;I)Ljava/util/List;",query_activities)]),
         (c"android/content/res/AssetManager",vec![Native::new1(c"open",c"(Ljava/lang/String;)Ljava/io/InputStream;",asset_open)]),
-        (c"android/os/Environment",vec![Native::new0(c"getExternalStorageState",c"()Ljava/lang/String;",storage_state)]),
+        (c"android/os/Environment",vec![
+            Native::new0(c"getExternalStorageState",c"()Ljava/lang/String;",storage_state),
+            Native::new0(c"getDataDirectory",c"()Ljava/io/File;",data_volume_dir),
+        ]),
         (c"android/os/Looper",vec![Native::new0(c"getMainLooper",c"()Landroid/os/Looper;",main_looper)]),
         (c"android/os/Handler",vec![Native::new1(c"<init>",c"(Landroid/os/Looper;)V",empty_constructor),Native::new2(c"postDelayed",c"(Ljava/lang/Runnable;J)Z",post_delayed),Native::new1(c"post",c"(Ljava/lang/Runnable;)Z",post)]),
         (c"java/lang/ClassLoader",vec![Native::new1(c"findLibrary",c"(Ljava/lang/String;)Ljava/lang/String;",find_library)]),
-        (c"android/os/Bundle",vec![Native::new1(c"containsKey",c"(Ljava/lang/String;)Z",bundle_contains),Native::new2(c"getString",c"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",bundle_string)]),
         (c"android/app/Activity",vec![
             Native::new0(c"getIntent",c"()Landroid/content/Intent;",intent),
             Native::new1(c"runOnUiThread",c"(Ljava/lang/Runnable;)V",run_on_ui),
         ]),
         (c"android/content/Intent",vec![
+            Native::new0(c"<init>",c"()V",intent_init_empty),
             Native::new1(c"<init>",c"(Ljava/lang/String;)V",intent_init),
             Native::new0(c"getAction",c"()Ljava/lang/String;",intent_action),
+            Native::new1(c"setAction",c"(Ljava/lang/String;)Landroid/content/Intent;",intent_set_action),
             Native::new1(c"setPackage",c"(Ljava/lang/String;)Landroid/content/Intent;",intent_set_package),
             Native::new0(c"getPackage",c"()Ljava/lang/String;",intent_package),
             Native::new1(c"addCategory",c"(Ljava/lang/String;)Landroid/content/Intent;",intent_add_category),
@@ -367,12 +502,13 @@ fn register_services(env: JniEnv) -> i32 {
             Native::new1(c"setFlags",c"(I)Landroid/content/Intent;",intent_set_flags),
             Native::new0(c"getFlags",c"()I",intent_flags),
             Native::new0(c"getData",c"()Landroid/net/Uri;",null_object),
-            Native::new0(c"getExtras",c"()Landroid/os/Bundle;",extras),
-            Native::new1(c"getStringExtra",c"(Ljava/lang/String;)Ljava/lang/String;",intent_string),
         ]),
         (c"java/io/File",vec![
             Native::new0(c"getAbsolutePath",c"()Ljava/lang/String;",file_path),
             Native::new0(c"getPath",c"()Ljava/lang/String;",file_path),
+            // File.toString is its pathname, including virtual Object calls;
+            // Object's class@handle display text is not a filesystem path.
+            Native::new0(c"toString",c"()Ljava/lang/String;",file_path),
             Native::new0(c"getParent",c"()Ljava/lang/String;",file_parent),
         ]),
         (c"org/rudroid/runtime/UiThread",vec![Native::new0(c"drain",c"()V",drain_ui)]),
@@ -383,37 +519,12 @@ fn register_services(env: JniEnv) -> i32 {
 
 static PACKAGE_INFO: OnceLock<usize> = OnceLock::new();
 static MAIN_LOOPER: OnceLock<usize> = OnceLock::new();
-static EXTRAS: OnceLock<usize> = OnceLock::new();
 static STORAGE_STATE: OnceLock<usize> = OnceLock::new();
 static BASE_PACKAGE: OnceLock<usize> = OnceLock::new();
-fn absolute(path:&std::path::Path)->std::path::PathBuf {
-    path.canonicalize().unwrap_or_else(|_|if path.is_absolute(){path.to_owned()}else{std::env::current_dir().unwrap_or_else(|_|"/".into()).join(path)})
-}
-extern "C" fn base_package(env:JniEnv,_context:JObject)->JObject {
-    singleton(env,&BASE_PACKAGE,|| {
-        let root=code_path(env,std::ptr::null_mut());let text=super::preferences::text(env,root);env.delete_local_ref(root);
-        let Some(text)=text else{return std::ptr::null_mut();};
-        let path=std::path::PathBuf::from(text);
-        let configured=if path.is_dir(){path.join("base.apk")}else{path.clone()};
-        let chosen=[configured,std::path::PathBuf::from("base.apk"),"gamedata/base.apk".into()].into_iter().find(|p|p.is_file()).unwrap_or(path);
-        super::preferences::string(env,&absolute(&chosen).to_string_lossy())
-    })
-}
+#[path="package_paths.rs"]
+mod packages;
+use packages::*;
 
-fn split_packages(env:JniEnv)->*mut c_void {
-    let mut paths=Vec::new();
-    for index in 0..rudroid_common::android_assets::MAX_PACKS {
-        match super::HOST.get().unwrap().asset_path(rudroid_common::android_assets::SPLIT,c"",None,index as u32) {
-            Ok(Some(path))=>paths.push(path),Ok(None)=>break,Err(_)=>return std::ptr::null_mut(),
-        }
-    }
-    if paths.is_empty(){return std::ptr::null_mut();}
-    let class=env.find_class(c"java/lang/String");let array=env.new_object_array(paths.len() as i32,class,std::ptr::null_mut());
-    for (index,path) in paths.iter().enumerate(){
-        let value=super::preferences::string(env,&path.to_string_lossy());env.set_object_array_element(array,index as i32,value);super::preferences::delete(env,value);
-    }
-    super::preferences::delete(env,class);array
-}
 fn directory(env:JniEnv,key:&CStr,default:&CStr)->*mut c_void {
     let Some(host)=super::HOST.get() else{return std::ptr::null_mut();};
     let requested=configured(host,key,default);
@@ -431,6 +542,23 @@ extern "C" fn files_dir(env:JniEnv,_context:JObject)->JObject {
 extern "C" fn data_dir(env:JniEnv,_context:JObject)->JObject {
     directory(env,c"paths.android_data",c".")
 }
+extern "C" fn data_volume_dir(env:JniEnv,_class:JObject)->JObject {
+    // The isolated Android data mapping selects the real writable directory.
+    // Its identity must not fall back to the game/CWD; StatFs independently
+    // exposes the legacy fixed-capacity compatibility view.
+    let configured=super::HOST.get().and_then(|host|host.config_string(c"paths.android_data",4096));
+    if configured.as_deref().is_none_or(str::is_empty) {
+        let error=env.find_class(c"java/lang/IllegalStateException");
+        env.throw_new(error,c"Android data directory is not configured");env.delete_local_ref(error);
+        return std::ptr::null_mut();
+    }
+    let file=directory(env,c"paths.android_data",c"");
+    if file.is_null() && !env.exception_check() {
+        let error=env.find_class(c"java/io/IOException");
+        env.throw_new(error,c"Android data directory is unavailable");env.delete_local_ref(error);
+    }
+    file
+}
 extern "C" fn cache_dir(env:JniEnv,_context:JObject)->JObject {
     directory(env,c"paths.android_cache",c".")
 }
@@ -438,14 +566,20 @@ extern "C" fn external_dir(env:JniEnv,_context:JObject,_kind:JObject)->JObject {
     directory(env,c"paths.android_external_files",c".")
 }
 extern "C" fn package_info(env:JniEnv,_manager:JObject,_package:JObject,_flags:i32)->JObject {
-    singleton(env,&PACKAGE_INFO,||{
+    // Preserve a declaration failure on every query; do not poison this
+    // singleton with a null while ApplicationInfo has a pending exception.
+    let info=application_info(env,std::ptr::null_mut());
+    if info.is_null() {return std::ptr::null_mut();}
+    let result=singleton(env,&PACKAGE_INFO,||{
         let object=allocate(env,c"android/content/pm/PackageInfo");
         set_string_field(env,object,c"packageName",package_name(env,std::ptr::null_mut()));
         set_string_field(env,object,c"versionName",config_string(env,c"package.versionName",c"0.1",false));
-        let class=env.get_object_class(object);let info=application_info(env,std::ptr::null_mut());
+        let class=env.get_object_class(object);
         env.set_int_field(object,env.get_field_id(class,c"versionCode",c"I"),super::HOST.get().unwrap().config_i64(c"package.versionCode",1) as i32);
-        env.set_object_field(object,env.get_field_id(class,c"applicationInfo",c"Landroid/content/pm/ApplicationInfo;"),info);env.delete_local_ref(info);env.delete_local_ref(class);object
-    })
+        env.set_object_field(object,env.get_field_id(class,c"applicationInfo",c"Landroid/content/pm/ApplicationInfo;"),info);env.delete_local_ref(class);object
+    });
+    env.delete_local_ref(info);
+    result
 }
 extern "C" fn asset_open(env:JniEnv,_assets:JObject,name:JObject)->JObject {
     let Some(text)=super::preferences::text(env,name) else{return std::ptr::null_mut();};
@@ -483,24 +617,6 @@ extern "C" fn find_library(env:JniEnv,_loader:JObject,name:JObject)->JObject {
     }
     env.new_local_ref(name)
 }
-extern "C" fn extras(env:JniEnv,_intent:JObject)->JObject {
-    singleton(env,&EXTRAS,||allocate(env,c"android/os/Bundle"))
-}
-/// `package.mainIntentBundle.<key>` for the Java string `key`; `None` when unreadable.
-fn bundle_key(env:JniEnv,key:*mut c_void)->Option<CString> {
-    let text=env.string_utf(key)?;
-    Some(CString::new(format!("package.mainIntentBundle.{}",text.to_string_lossy())).unwrap())
-}
-extern "C" fn bundle_contains(env:JniEnv,_bundle:JObject,key:JObject)->u8 {
-    let Some(key)=bundle_key(env,key) else{return 0;};
-    let host=super::HOST.get().unwrap();u8::from(host.config_string(&key,4096).is_some())
-}
-extern "C" fn bundle_string(env:JniEnv,bundle:JObject,key:JObject,default:JObject)->JObject {
-    if bundle_contains(env,bundle,key)==0 {return env.new_local_ref(default);}
-    let Some(config)=bundle_key(env,key) else{return std::ptr::null_mut();};config_string(env,&config,c"",false)
-}
-extern "C" fn intent_string(env:JniEnv,intent:JObject,key:JObject)->JObject {bundle_string(env,intent,key,std::ptr::null_mut())}
-
 extern "C" fn storage_state(env:JniEnv,_class:JObject)->JObject {
     cached_string(env,&STORAGE_STATE,c"android.storage_state",c"mounted",false)
 }

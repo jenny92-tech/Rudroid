@@ -22,6 +22,24 @@ class AudioResourceValidateTest(unittest.TestCase):
             (Path(td) / "audio.resource").write_bytes(b"FSB5payload")
             self.assertEqual(validate_ref(Path(td), AudioRef("clip", r"C:\data\audio.resource", 0, 11)), [])
 
+    def test_archive_prefix_does_not_bypass_validation_of_an_external_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "audio.resource").write_bytes(b"bad!payload")
+            ref = AudioRef("clip", "archive:/CAB/audio.resource", 0, 11)
+            self.assertIn("invalid audio header", validate_ref(root, ref)[0])
+            (root / "audio.resource").write_bytes(b"FSB5payload")
+            self.assertEqual(validate_ref(root, ref), [])
+
+    def test_directory_prefixes_do_not_select_an_unrelated_nested_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "nested").mkdir()
+            (root / "nested/audio.resource").write_bytes(b"FSB5payload")
+            self.assertIn("missing", validate_ref(root, AudioRef("clip", "nested/audio.resource", 0, 11))[0])
+            (root / "audio.resource").write_bytes(b"bad!payload")
+            self.assertIn("invalid audio header", validate_ref(root, AudioRef("clip", "nested/audio.resource", 0, 11))[0])
+
     def test_symlink_resource_and_out_of_bounds_ranges_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

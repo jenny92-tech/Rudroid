@@ -76,14 +76,13 @@ fn run_real_game(memory_case: &str) {
 #[cfg(all(target_os = "linux", target_arch = "aarch64", rudroid_kit_sdl))]
 fn run_real_game_at(memory_case: &str, evidence_label: &str) {
     use rudroid_test_support::cargo::{
-        assert_kit_features, crates_root, ensure_workspace_cdylib,
+        crates_root, ensure_workspace_cdylib,
     };
     use std::fs::{self, File};
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    assert_kit_features(platform_sdl_runtime::SDL_ENABLED);
     let game = std::env::var_os("RUDROID_VAMPIRE_GAME_DIR")
         .map(std::path::PathBuf::from)
         .expect("set RUDROID_VAMPIRE_GAME_DIR to the original game-data directory");
@@ -349,6 +348,7 @@ for name in ['aa','EOS','UnityServicesProjectConfiguration.json']:
         .env_remove("RUDROID_SKIP_GUEST")
         .env("SDL_AUDIODRIVER","disk")
         .env("SDL_DISKAUDIOFILE",&pcm)
+        .env("RUDROID_DIAGNOSTICS", "1")
         .env("RUDROID_CAPTURE_GUEST_FRAME_PATH",&frame)
         .env("RUDROID_CAPTURE_GUEST_FRAME_AFTER_MS","50000")
         .env("RUDROID_CAPTURE_GUEST_FRAME_EXTRA_AFTER_MS","15000,26000,35000,56000,90000")

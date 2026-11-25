@@ -2,6 +2,7 @@
 //! OUTPUT:  `tests` unit tests, compiled into the crate only under cfg(test)
 //! POS:    keeps test bodies out of `src/lib.rs`; declared there with `#[path]`
 use super::*;
+use rudroid_unity_common::RUDROID_UNITY_PROFILE_NONE;
 use std::sync::Mutex;
 
 #[test]
@@ -181,7 +182,7 @@ fn spec_matches_reference_literal() {
 /// (the integration test proves the dynamic half).
 #[test]
 fn registration_contract_names_its_requirements() {
-    assert_eq!(rudroid_common::host_api::HOST_API_VERSION, 4);
+    assert_eq!(rudroid_common::host_api::HOST_API_VERSION, 7);
     assert!(!ENGINE_SPEC.player_class.is_empty());
     assert!(!ENGINE_SPEC.player_constructor_signature.is_empty());
     assert!(!ENGINE_SPEC.init_jni_signature.is_empty());

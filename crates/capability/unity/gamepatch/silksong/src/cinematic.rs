@@ -6,15 +6,14 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 use rudroid_common::arm64_detour::Original;
-use rudroid_common::il2cpp::{Il2cpp, Method};
+use rudroid_unity_common::il2cpp::{Il2cpp, Method};
 use super::{InstallEvent, SilksongFeatures, UpdateFn};
 
 static ORIGINAL: Original<UpdateFn> = Original::new();
 static CONTEXT: Mutex<Option<(Il2cpp, Method)>> = Mutex::new(None);
 static STOPPED: AtomicBool = AtomicBool::new(true);
 thread_local! { static BUSY: Cell<bool> = const { Cell::new(false) }; }
-struct Guard;
-impl Drop for Guard { fn drop(&mut self) { BUSY.with(|v| v.set(false)); } }
+use rudroid_unity_common::gamepatch_support::ReentryGuard;
 pub(super) fn stop() { STOPPED.store(true, Ordering::Release); }
 
 unsafe extern "C-unwind" fn begin(receiver: *mut c_void, metadata: *mut c_void) {
@@ -24,8 +23,8 @@ unsafe extern "C-unwind" fn begin(receiver: *mut c_void, metadata: *mut c_void) 
     }
     if receiver.is_null() || STOPPED.load(Ordering::Acquire) { return; }
     let Some((api, skip)) = *super::lock(&CONTEXT) else { return; };
-    if !api.thread_attached() || BUSY.with(|v| v.replace(true)) { return; }
-    let _guard = Guard;
+    if !api.thread_attached() { return; }
+    let Some(_guard) = ReentryGuard::enter(&BUSY) else { return; };
     // SAFETY: instance void Skip() belongs to the same validated class;
     // receiver is kept reachable on this active attached callback's stack.
     let result = unsafe {

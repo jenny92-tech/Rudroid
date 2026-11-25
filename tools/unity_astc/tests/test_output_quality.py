@@ -95,6 +95,39 @@ class SerializedOutputTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inline and streamed"):
                 self.validate()
 
+    def test_independent_validation_rejects_a_selected_tmp_font_atlas(self):
+        original_environment = self.environment
+
+        def environment(texture, mesh):
+            env = original_environment(texture, mesh)
+            font = SimpleNamespace(assets_file=SimpleNamespace(name="CAB"), path_id=3,
+                                   type=SimpleNamespace(name="MonoBehaviour"),
+                                   read_typetree=lambda: {"m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 1}],
+                                                         "m_GlyphTable": []})
+            env.objects.append(font)
+            return env
+
+        with patch.object(self, "environment", side_effect=environment):
+            with self.assertRaisesRegex(ValueError, "font or sensitive"):
+                self.validate()
+
+    def test_append_ownership_uses_the_actual_directory_and_case_of_the_node(self):
+        texture = self.after.read()
+        texture.image_data = b""
+        texture.get_image_data = lambda: b"b" * 256
+        texture.m_StreamData = SimpleNamespace(path="archive:/CAB/pixels.resS", offset=16, size=256)
+        original = b"original-prefix!"
+        before = EndianBinaryReader(original)
+        after = EndianBinaryReader(original + b"b" * 256)
+        before.flags = after.flags = 0
+        prefixes = validator.stream_snapshot(SimpleNamespace(files={"folder/PIXELS.resS": before}), None, {})
+        env = self.environment(self.after, self.new_mesh)
+        env.file.files["folder/PIXELS.resS"] = after
+        with (patch.object(validator.UnityPy, "load", return_value=env),
+              patch.object(converter, "check_streams", return_value=0)):
+            actual = validator.snapshot(Path("output.bundle"), Path("."), set(self.expected), self.expected, prefixes)
+        self.assertEqual(actual["streams"], prefixes)
+
 
 class SerializedLayoutTest(unittest.TestCase):
     def file(self, data, offset=24):

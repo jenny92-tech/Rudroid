@@ -1,0 +1,24 @@
+# Soul Knight 8.7.0 / Unity 2022.3.62f2 candidate kit.
+# Core Android, extracted asset packs, SDL and the Context-only 2022 profile.
+# This is an interface candidate, not a completed gameplay acceptance.
+platform_log_stderr
+android_base
+android_jni_vm
+reply_catalog
+android_elf_load
+android_bionic
+android_native_events
+android_media_fallback
+android_zlib
+android_assets
+platform_android_asset_packs
+platform_sdl_runtime
+unity_2022_3
+# Engine-embedded FMOD support: org/fmod Java surface + real AudioOutput/PCM
+# mixer bridge only (sdk_fmod.embedded_unity_audio). Not a licensed
+# libfmod/libfmodstudio deployment and not an audio or SDK success claim.
+sdk_fmod
+# Original AnoApplication bootstrap adapter (package/version/build gated).
+soul_knight
+# Explicit offline research additionally selects il2cpp_patch and configures an
+# owned independent profile. Keep it absent from this ordinary bootstrap kit.

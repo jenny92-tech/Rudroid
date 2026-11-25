@@ -7,7 +7,7 @@
 pub(super) const MASCOT_SIDE: i32 = 300;
 pub(super) const MASCOT: &[u8; 300 * 300 * 4] = include_bytes!("../assets/mascot.rgba");
 pub(super) const TITLE: &str = "RUDROID";
-const SUBTITLE: &str = "UNITY LOADER";
+const SUBTITLE: &str = "ANDROID LOADER";
 
 /// One attribute carries clip coordinates and either image UVs or a solid
 /// color selector. The fresh startup context submits this batch only once.

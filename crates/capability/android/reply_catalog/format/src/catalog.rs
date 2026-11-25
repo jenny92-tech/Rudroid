@@ -1,3 +1,6 @@
+//! INPUT: decoded or compiled fixed JNI reply records
+//! OUTPUT: indexed class, method and signature lookups
+//! POS: shared reply catalog read API
 //! Queryable catalog model shared by every consumer of fixed replies.
 //!
 //! This is plain-library code: no descriptor export, no cdylib, no embedded

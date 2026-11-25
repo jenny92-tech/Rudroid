@@ -26,7 +26,7 @@
 | ELF 映射 | 文件映射按需驻留；noexec 使用校验后的复制回退，必要补丁与缓存维护保留，无游戏期定时回收 |
 | 资源流 | balanced 每流 8 KiB、VM 总载荷 1 MiB，按需申请并随 close/最后引用释放；存档、可变文件和大块读取直读 |
 | 音频 | 固定缓冲和背压，callback 不分配、加锁或做 I/O；完整清理先 stop/join 再释放 |
-| 帧节奏 | 两 profile 默认 target_fps=90、render_sleep_us=0，只补本帧剩余等待；不额外固定睡眠 |
+| 帧节奏 | 三个 Unity profile（共享 player_lifecycle）默认 target_fps=90、render_sleep_us=0，只补本帧剩余等待；不额外固定睡眠 |
 | Unity 回收 | 沿用引擎 GC；额外 GC、UnusedAssets 和批量 AssetBundle 卸载不进入五标题默认 |
 | 日志 | 普通运行仅有界异常上下文；追踪、帧直方图、CPU 和内存采样显式开启 |
 

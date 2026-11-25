@@ -42,7 +42,12 @@ extern "C" fn shutdown(env: JniEnv, _class: JObject) {
         std::mem::take(&mut state.hooks)
     };
     let first = run_hooks(env, hooks);
-    super::java::discard_ui_jobs(env);
+    // An independent native player may need UI callbacks during nativeDone
+    // or post-native joins. Its creator keeps pumping until finish returns.
+    // The ordinary single-thread policy retains its existing cutoff.
+    if !super::HOST.get().is_some_and(|host|host.config_bool(c"unity.separate_player_thread",false)) {
+        super::java::discard_ui_jobs(env);
+    }
     super::input::shutdown(env);
     // Core queues and native-owned audio producers remain available to
     // nativeDone. Their native owner must stop/join callbacks before freeing

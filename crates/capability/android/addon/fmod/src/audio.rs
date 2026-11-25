@@ -28,13 +28,14 @@ struct Runner {
     stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
-    owner: std::thread::ThreadId,
+    owner: std::thread::Thread,
 }
 static RUNNERS: OnceLock<Mutex<HashMap<u64, Arc<Runner>>>> = OnceLock::new();
 static START: Mutex<()> = Mutex::new(());
 static CLOSING: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Default)]
 struct MixerPolicy {
+    embedded: bool,
     clocked: bool,
     reuse_format: bool,
     silence: bool,
@@ -67,6 +68,12 @@ fn log(message: &str) {
     if let Some(api) = HOST.get() {
         api.log_line(c"FMOD", message);
     }
+}
+
+/// Host configuration is immutable across phases; no second mode latch is
+/// needed between JNI registration and init. Producers use the policy snapshot.
+pub(super) fn embedded_unity_audio(api: &HostApiV0) -> bool {
+    api.config_bool(c"sdk_fmod.embedded_unity_audio", false)
 }
 
 pub(super) fn configure(api: &HostApiV0) {
@@ -203,7 +210,7 @@ extern "C" fn start(env: JniEnv, object: JObject) {
     match spawned {
         Ok(thread) => {
             if ready_rx.recv().unwrap_or(false) {
-                let owner = thread.thread().id();
+                let owner = thread.thread().clone();
                 runners().lock().unwrap().insert(
                     serial,
                     Arc::new(Runner {
@@ -239,7 +246,8 @@ extern "C" fn stop(env: JniEnv, object: JObject) {
     };
     if let Some(runner) = runner {
         runner.stop.store(true, Ordering::Release);
-        if runner.owner == std::thread::current().id() {
+        runner.owner.unpark();
+        if runner.owner.id() == std::thread::current().id() {
             return;
         }
         // Every external close joins the same producer; keep the entry visible
@@ -283,9 +291,10 @@ fn stop_all() {
     };
     for runner in all.values() {
         runner.stop.store(true, Ordering::Release);
+        runner.owner.unpark();
     }
     for (serial, runner) in all {
-        if runner.owner == std::thread::current().id() {
+        if runner.owner.id() == std::thread::current().id() {
             continue;
         }
         let mut join = runner.thread.lock().unwrap();
@@ -320,6 +329,13 @@ fn int(env: JniEnv, receiver: JObject, method: Option<Method>, args: &[Arg]) -> 
     env.pop_local_frame(std::ptr::null_mut());
     result
 }
+fn wait_until(stop: &AtomicBool, deadline: std::time::Instant) {
+    while !stop.load(Ordering::Acquire) {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else { break };
+        std::thread::park_timeout(remaining);
+    }
+}
+
 fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
     let device_class = env.get_object_class(device);
     let info = method(env, device_class, c"fmodGetInfo", c"(I)I", false);
@@ -382,7 +398,7 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
                 log(&format!("waiting for valid mixer format: {requested:?}"));
                 warned_format = true;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            wait_until(stop, std::time::Instant::now() + Duration::from_millis(100));
             continue;
         };
         if !using_cached {
@@ -410,7 +426,7 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
                     env.exception_describe();
                     env.exception_clear();
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                wait_until(stop, std::time::Instant::now() + Duration::from_millis(100));
                 continue;
             }
             buffer = allocate.map_or(std::ptr::null_mut(), |allocate| {
@@ -421,7 +437,7 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
             }
             warned_format = false;
             format = Some((rate, frames, channels));
-            pcm.resize((frames * channels * 2) as usize, 0);
+            if policy.diagnostic { pcm.resize((frames * channels * 2) as usize, 0); }
             next_tick = None;
             log(&format!(
                 "mixer output opened: rate={rate} channels={channels} frames={frames}"
@@ -432,12 +448,15 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
             break;
         }
         let ready = int(env, device, info, &[Arg::int(3)]) == 1;
-        if !policy.silence
-            && (ready || using_cached)
-            && int(env, device, mix, &[Arg::object(buffer)]) != 0
-        {
-            log("engine mixer failed to fill PCM");
-            break;
+        if !policy.silence && (ready || using_cached) {
+            let result = int(env, device, mix, &[Arg::object(buffer)]);
+            // The evidenced embedded Java AudioDevice ignores this int return;
+            // it is not a success/status contract. Preserve the separate-library
+            // bridge's historical status interpretation only in its own mode.
+            if !policy.embedded && result != 0 {
+                log("engine mixer failed to fill PCM");
+                break;
+            }
         }
         let written = int(env, output, write, &[Arg::object(buffer), Arg::int(frames)]);
         // Zero accepts no PCM after a bounded backpressure timeout. Keep the
@@ -465,7 +484,7 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
             let duration = Duration::from_nanos((frames as u64 * 1_000_000_000) / rate as u64);
             let deadline = next_tick.unwrap_or(now) + duration;
             if deadline > now {
-                std::thread::sleep(deadline - now);
+                wait_until(stop, deadline);
                 next_tick = Some(deadline);
             } else {
                 next_tick = Some(now);
@@ -489,6 +508,7 @@ fn produce(env: JniEnv, device: JObject, stop: &AtomicBool) {
 pub(super) fn register(api: &HostApiV0, env: JniEnv) -> i32 {
     HOST.get_or_init(|| *api);
     POLICY.get_or_init(|| MixerPolicy {
+        embedded: embedded_unity_audio(api),
         clocked: api.config_bool(c"sdk_fmod.clocked_audio_pump", false),
         reuse_format: api.config_bool(c"sdk_fmod.reuse_last_valid_format", false),
         silence: api.config_bool(c"sdk_fmod.silence_audio_pump", false),
@@ -530,7 +550,14 @@ pub(super) fn register(api: &HostApiV0, env: JniEnv) -> i32 {
     {
         return -1;
     }
-    if env.register_class(
+    if !embedded_unity_audio(api) && env.register_class(
+        // Embedded Unity FMOD initializes its own Java SDK: this mode must not
+        // publish the addon's constant-true `checkInit` or empty `init` helper,
+        // without making any readiness query. Other VM providers remain
+        // independent of this addon's registration. The AudioDevice/
+        // FMODAudioDevice surface and the real AudioOutput mixer bridge above
+        // stay registered, and the engine's own fmodGetInfo/fmodProcess remain
+        // the engine's (never registered or stubbed here).
         c"org/fmod/FMOD",
         &[
             Native::new0(c"checkInit", c"()Z", check_init),

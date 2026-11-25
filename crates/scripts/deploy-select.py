@@ -66,6 +66,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -77,6 +78,9 @@ from linux_abi import AbiError, DEFAULT_GLIBC_MAX, audit_file
 MANIFEST_NAME = ".deploy-select-manifest.json"
 MANIFEST_FORMAT = 1
 LOADER_NAME = "rudroid-unity-loader"
+# Same main.rs; either cargo [[bin]] satisfies --include-loader.
+LOADER_CANDIDATES = (LOADER_NAME, "rudroid-loader")
+KIT_ID_RE = re.compile(rb"rust-kit-[0-9a-f]{16}(?:-ci-[0-9A-Za-z._-]{1,64})?")
 
 # Ids whose build artifact name differs from the deployed `lib<id>.<ext>`
 # convention. Keys are capability ids (descriptor ids, see
@@ -189,10 +193,22 @@ def write_manifest(dest: Path, managed: list[str], ids: list[str], loader: str |
 def resolve_artifact(build_dir: Path, cap_id: str, listing: set[str]) -> Path | None:
     """Like artifact_for, but case-exact: on a case-insensitive build dir
     (APFS/exFAT) `Android_base` must not resolve to `libandroid_base.so`."""
-    artifact = artifact_for(build_dir, cap_id)
-    if artifact is None or artifact.name not in listing:
-        return None
-    return artifact
+    artifact_id = ID_ARTIFACT_ALIASES.get(cap_id, cap_id)
+    candidates = [
+        build_dir / f"lib{artifact_id}.so",
+        build_dir / f"lib{artifact_id}.dylib",
+        build_dir / f"{artifact_id}.so",
+        build_dir / f"{artifact_id}.dylib",
+    ]
+    for candidate in candidates:
+        if candidate.name in listing and candidate.is_file():
+            return candidate
+    return None
+
+
+def _kit_ids_in_file(path: Path) -> list[str]:
+    data = path.read_bytes()
+    return sorted({match.decode("ascii") for match in KIT_ID_RE.findall(data)})
 
 
 def deploy(args: argparse.Namespace, ids: list[str]) -> int:
@@ -200,7 +216,7 @@ def deploy(args: argparse.Namespace, ids: list[str]) -> int:
     if not build_dir.is_dir():
         raise DeployError(f"build dir is not a directory: {build_dir}", 2)
 
-    bad_ids = [cap_id for cap_id in ids if not is_plain_name(f"lib{cap_id}.so")]
+    bad_ids = [cap_id for cap_id in ids if not is_plain_name(cap_id)]
     if bad_ids:
         raise DeployError(
             "capability ids must be plain names: " + ", ".join(repr(i) for i in bad_ids), 2
@@ -240,12 +256,13 @@ def deploy(args: argparse.Namespace, ids: list[str]) -> int:
         deployed_name = f"lib{cap_id}{artifact.suffix}"
         members.append((deployed_name, artifact))
     if args.include_loader:
-        loader = build_dir / LOADER_NAME
-        if not loader.is_file():
+        loader = next((build_dir / name for name in LOADER_CANDIDATES if (build_dir / name).is_file()), None)
+        if loader is None:
             raise DeployError(
-                f"--include-loader requested but {loader} does not exist; "
-                "build the workspace (the loader is the workspace's rudroid-unity-loader bin)"
+                f"--include-loader requested but none of {LOADER_CANDIDATES} exist in {build_dir}; "
+                "build the workspace (rudroid-unity-loader / rudroid-loader bins)"
             )
+        # Deploy under the historical launcher name regardless of which bin was built.
         members.append((LOADER_NAME, loader))
 
     production_issues = [
@@ -259,6 +276,24 @@ def deploy(args: argparse.Namespace, ids: list[str]) -> int:
             + "; ".join(production_issues)
             + " — rebuild through docker-rust.sh without --pgo-generate"
         )
+
+    # Verify kit-wide runtime_build_id homogeneity when any member carries a kit id.
+    member_kit_ids: dict[str, list[str]] = {}
+    for deployed_name, artifact in members:
+        found = _kit_ids_in_file(artifact)
+        if len(found) > 1:
+            raise DeployError(
+                f"refusing artifact with multiple kit ids: {artifact.name} ({', '.join(found)})"
+            )
+        member_kit_ids[deployed_name] = found
+    present_ids = {found[0] for found in member_kit_ids.values() if found}
+    if present_ids:
+        missing_kit = [name for name, found in member_kit_ids.items() if not found]
+        if missing_kit or len(present_ids) > 1:
+            detail = ", ".join(
+                f"{name}={found[0] if found else '<none>'}" for name, found in member_kit_ids.items()
+            )
+            raise DeployError(f"refusing mixed-kit selection before staging: {detail}")
 
     # Linux ELF deployments get a conservative ABI ceiling before any destination
     # mutation. Mach-O deployments keep their existing independent contract.
@@ -276,15 +311,28 @@ def deploy(args: argparse.Namespace, ids: list[str]) -> int:
         print(f"Linux ABI audit: {linux_members} ARM64 members, glibc ceiling {args.max_glibc} (direct dependencies)")
 
     dest = Path(args.dest)
-    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        raise DeployError(f"cannot create deploy dir {dest}: {err}") from err
     previous_managed = read_managed(dest)
     if previous_managed is None:
         previous_managed = []
-        legacy = sorted(
+        selected_names = {name for name, _ in members}
+        legacy_paths = [
             p.name
             for p in dest.iterdir()
-            if p.suffix in (".so", ".dylib") and p.name not in {name for name, _ in members}
-        )
+            if p.is_file() and p.suffix in (".so", ".dylib") and p.name not in selected_names
+        ]
+        for subname in ("plugins", "gamepatchs"):
+            subdir = dest / subname
+            if subdir.is_dir():
+                legacy_paths.extend(
+                    f"{subname}/{p.name}"
+                    for p in subdir.iterdir()
+                    if p.is_file() and p.suffix in (".so", ".dylib")
+                )
+        legacy = sorted(legacy_paths)
         if legacy:
             print(
                 "note: no deploy manifest in " + str(dest) + "; pre-58 deployment layout — "
@@ -368,7 +416,11 @@ def main() -> int:
 
     ids = list(args.ids)
     if args.from_profile:
-        ids += ids_from_profile(args.from_profile)
+        try:
+            ids += ids_from_profile(args.from_profile)
+        except OSError as err:
+            print(f"error: cannot read profile {args.from_profile}: {err}", file=sys.stderr)
+            return 2
     # Selection is a set; preserve the first occurrence's deployment order.
     ids = list(dict.fromkeys(ids))
     if not ids and not args.include_loader:

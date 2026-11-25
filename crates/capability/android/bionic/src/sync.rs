@@ -1,7 +1,8 @@
 //! INPUT:  Android LP64 opaque layouts, native pthread and aligned atomic handles
-//! OUTPUT:  Bionic mutex/cond/rwlock/semaphore/barrier/spin/once and attribute addresses
+//! OUTPUT:  Bionic sync/attribute addresses plus opt-in received wait-caller metadata
 //! POS:    stores one host synchronization object per guest facade, with no hot registry
 
+use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::mem::{size_of, MaybeUninit};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +15,7 @@ use std::sync::Mutex;
 static INIT: Mutex<()> = Mutex::new(());
 // Cold lifecycle inventory only; hot lock/wait calls never inspect it. Guest
 // globals can disappear at ELF unmap without an explicit pthread_destroy.
-static OWNED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+static OWNED: std::sync::LazyLock<Mutex<HashMap<usize, Entry>>> = std::sync::LazyLock::new(Mutex::default);
 struct Entry {
     guest: usize,
     native: usize,
@@ -50,6 +51,10 @@ impl Kind {
             Self::Spin => 8,
         }
     }
+    fn valid_guest(self, guest: *mut c_void) -> bool {
+        let alignment = if matches!(self, Self::Spin | Self::Barrier) { 8 } else { 4 };
+        !guest.is_null() && guest.addr() % alignment == 0
+    }
     fn native_size(self) -> usize {
         match self {
             Self::Mutex => size_of::<libc::pthread_mutex_t>(),
@@ -62,7 +67,7 @@ impl Kind {
     }
 }
 
-// The aligned word is wholly inside every guest layout even at base % 8 == 4.
+// All callers validate the layout alignment before accessing the atomic slot.
 // No Rust Box/Vec ownership is transferred: the payload is a native C object
 // allocated by calloc, initialized/destroyed by pthread, and released by free.
 unsafe fn slot<'a>(guest: *mut c_void) -> &'a AtomicUsize {
@@ -84,7 +89,7 @@ unsafe fn publish(guest: *mut c_void, kind: Kind, value: usize) {
 }
 
 unsafe fn initialize(guest: *mut c_void, attr: isize, kind: Kind) -> c_int {
-    if guest.is_null() {
+    if !kind.valid_guest(guest) {
         return libc::EINVAL;
     }
     let shared = match kind {
@@ -175,13 +180,15 @@ unsafe fn initialize(guest: *mut c_void, attr: isize, kind: Kind) -> c_int {
             libc::free(native);
             return libc::ENOMEM;
         }
-        records.push(Entry {
+        records.insert(native as usize, Entry {
             guest: guest as usize,
             native: native as usize,
             kind,
         });
         #[cfg(test)]
         LIVE.fetch_add(kind.native_size() as isize, Ordering::Relaxed);
+        let observed_errno=*libc::__errno_location();
+        super::sync_observation::register(native as usize);*libc::__errno_location()=observed_errno;
         publish(guest, kind, native as usize);
     } else {
         libc::free(native);
@@ -204,7 +211,7 @@ unsafe fn native_destroy(native: *mut c_void, kind: Kind) -> c_int {
 }
 
 unsafe fn ensure(guest: *mut c_void, kind: Kind) -> Result<*mut c_void, c_int> {
-    if guest.is_null() {
+    if !kind.valid_guest(guest) {
         return Err(libc::EINVAL);
     }
     let mut handle = slot(guest).load(Ordering::Acquire);
@@ -240,7 +247,7 @@ unsafe fn ensure(guest: *mut c_void, kind: Kind) -> Result<*mut c_void, c_int> {
 }
 
 unsafe fn destroy(guest: *mut c_void, kind: Kind) -> c_int {
-    if guest.is_null() {
+    if !kind.valid_guest(guest) {
         return libc::EINVAL;
     }
     let handle = slot(guest).load(Ordering::Acquire);
@@ -252,17 +259,14 @@ unsafe fn destroy(guest: *mut c_void, kind: Kind) -> c_int {
         if result != 0 {
             return result;
         }
+        let observed_errno=*libc::__errno_location();
+        super::sync_observation::retire(handle);*libc::__errno_location()=observed_errno;
         libc::free(handle as *mut c_void);
         let mut records = OWNED.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(index) = records
-            .iter()
-            .position(|e| e.guest == guest as usize && e.native == handle)
-        {
-            records.swap_remove(index);
+        if records.get(&handle).is_some_and(|entry| entry.guest == guest as usize) {
+            records.remove(&handle);
         }
-        if records.is_empty() {
-            *records = Vec::new();
-        }
+        if records.is_empty() { *records = HashMap::new(); }
         #[cfg(test)]
         LIVE.fetch_sub(kind.native_size() as isize, Ordering::Relaxed);
     }
@@ -274,24 +278,19 @@ unsafe fn destroy(guest: *mut c_void, kind: Kind) -> c_int {
 /// this image must already be quiescent/joined, as required by pthread_destroy.
 pub(crate) unsafe fn finalize_range(start: usize, length: usize) {
     let mut records = OWNED.lock().unwrap_or_else(|e| e.into_inner());
-    let mut index = 0;
-    while index < records.len() {
-        let entry = &records[index];
-        if entry.guest >= start && entry.guest - start < length {
-            if native_destroy(entry.native as *mut c_void, entry.kind) == 0 {
-                libc::free(entry.native as *mut c_void);
-                publish(entry.guest as *mut c_void, entry.kind, DESTROYED);
-                #[cfg(test)]
-                LIVE.fetch_sub(entry.kind.native_size() as isize, Ordering::Relaxed);
-                records.swap_remove(index);
-                continue;
-            }
-        }
-        index += 1;
-    }
-    if records.is_empty() {
-        *records = Vec::new();
-    }
+    records.retain(|_, entry| {
+        if entry.guest < start || entry.guest - start >= length { return true; }
+        if native_destroy(entry.native as *mut c_void, entry.kind) != 0 { return true; }
+        let saved_errno = *libc::__errno_location();
+        super::sync_observation::retire(entry.native);
+        *libc::__errno_location() = saved_errno;
+        libc::free(entry.native as *mut c_void);
+        publish(entry.guest as *mut c_void, entry.kind, DESTROYED);
+        #[cfg(test)]
+        LIVE.fetch_sub(entry.kind.native_size() as isize, Ordering::Relaxed);
+        false
+    });
+    if records.is_empty() { *records = HashMap::new(); }
 }
 
 fn sem_error(code: c_int) -> c_int {
@@ -351,7 +350,16 @@ macro_rules! operation {
     ($name:ident, $native:ident, $kind:ident) => {
         unsafe extern "C" fn $name(guest: *mut c_void) -> c_int {
             match ensure(guest, Kind::$kind) {
-                Ok(p) => libc::$native(p.cast()),
+                Ok(p) => {
+                    if !super::sync_observation::enabled()
+                        || !matches!(stringify!($native),"pthread_cond_signal"|"pthread_cond_broadcast")
+                    {return libc::$native(p.cast());}
+                    let before=*libc::__errno_location();
+                    let ticket=super::sync_observation::begin(stringify!($native),p as usize,0,0);
+                    *libc::__errno_location()=before;
+                    let result=libc::$native(p.cast());let after=*libc::__errno_location();
+                    super::sync_observation::end(ticket,result);*libc::__errno_location()=after;result
+                },
                 Err(e) => e,
             }
         }
@@ -460,6 +468,25 @@ timed_operation!(rwlock_timedrdlock, pthread_rwlock_timedrdlock, Rwlock);
 timed_operation!(rwlock_timedwrlock, pthread_rwlock_timedwrlock, Rwlock);
 
 unsafe extern "C" fn cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int {
+    // SAFETY: forwards the unchanged borrowed pthread facades; zero means no
+    // diagnostic caller was received at the original, default entry.
+    unsafe { rudroid_bionic_cond_wait_at(cond, mutex, 0) }
+}
+
+// SAFETY: native-build links these private ARM64 tail entries with the exact
+// public wait prototypes; only the diagnostic provider exposes their addresses.
+unsafe extern "C" {
+    fn rudroid_bionic_guest_cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int;
+    fn rudroid_bionic_guest_cond_timedwait(cond: *mut c_void, mutex: *mut c_void, deadline: *const libc::timespec) -> c_int;
+}
+
+/// # Safety
+/// The caller lends the same live Android LP64 facades as pthread_cond_wait.
+/// caller_ra is received metadata only and is never dereferenced or executed.
+#[no_mangle]
+unsafe extern "C" fn rudroid_bionic_cond_wait_at(
+    cond: *mut c_void, mutex: *mut c_void, caller_ra: usize,
+) -> c_int {
     let c = match ensure(cond, Kind::Cond) {
         Ok(p) => p,
         Err(e) => return e,
@@ -468,12 +495,29 @@ unsafe extern "C" fn cond_wait(cond: *mut c_void, mutex: *mut c_void) -> c_int {
         Ok(p) => p,
         Err(e) => return e,
     };
-    libc::pthread_cond_wait(c.cast(), m.cast())
+    if !super::sync_observation::enabled() {return libc::pthread_cond_wait(c.cast(),m.cast());}
+    let before=*libc::__errno_location();
+    let ticket=super::sync_observation::begin("pthread_cond_wait",c as usize,m as usize,caller_ra);
+    *libc::__errno_location()=before;
+    let result=libc::pthread_cond_wait(c.cast(),m.cast());let after=*libc::__errno_location();
+    super::sync_observation::end(ticket,result);*libc::__errno_location()=after;result
 }
 unsafe extern "C" fn cond_timedwait(
     cond: *mut c_void,
     mutex: *mut c_void,
     deadline: *const libc::timespec,
+) -> c_int {
+    // SAFETY: unchanged facades and absolute deadline; the normal provider
+    // does not manufacture a caller address from a Rust wrapper's frame.
+    unsafe { rudroid_bionic_cond_timedwait_at(cond, mutex, deadline, 0) }
+}
+
+/// # Safety
+/// Same live facades/deadline contract as pthread_cond_timedwait. caller_ra
+/// is the extra scalar passed by the diagnostic tail entry, not a pointer borrow.
+#[no_mangle]
+unsafe extern "C" fn rudroid_bionic_cond_timedwait_at(
+    cond: *mut c_void, mutex: *mut c_void, deadline: *const libc::timespec, caller_ra: usize,
 ) -> c_int {
     if deadline.is_null() {
         return libc::EINVAL;
@@ -486,7 +530,12 @@ unsafe extern "C" fn cond_timedwait(
         Ok(p) => p,
         Err(e) => return e,
     };
-    libc::pthread_cond_timedwait(c.cast(), m.cast(), deadline)
+    if !super::sync_observation::enabled() {return libc::pthread_cond_timedwait(c.cast(),m.cast(),deadline);}
+    let before=*libc::__errno_location();
+    let ticket=super::sync_observation::begin("pthread_cond_timedwait",c as usize,m as usize,caller_ra);
+    *libc::__errno_location()=before;
+    let result=libc::pthread_cond_timedwait(c.cast(),m.cast(),deadline);let after=*libc::__errno_location();
+    super::sync_observation::end(ticket,result);*libc::__errno_location()=after;result
 }
 
 unsafe extern "C" fn attr_init(attr: *mut isize) -> c_int {
@@ -578,8 +627,14 @@ symbol_provider! {
     b"pthread_cond_destroy" => cond_destroy as *const () as usize,
     b"pthread_cond_signal" => cond_signal as *const () as usize,
     b"pthread_cond_broadcast" => cond_broadcast as *const () as usize,
-    b"pthread_cond_wait" => cond_wait as *const () as usize,
-    b"pthread_cond_timedwait" => cond_timedwait as *const () as usize,
+    b"pthread_cond_wait" => {
+        if super::sync_observation::enabled() { rudroid_bionic_guest_cond_wait as *const () as usize }
+        else { cond_wait as *const () as usize }
+    },
+    b"pthread_cond_timedwait" => {
+        if super::sync_observation::enabled() { rudroid_bionic_guest_cond_timedwait as *const () as usize }
+        else { cond_timedwait as *const () as usize }
+    },
     b"pthread_rwlock_init" => rwlock_init as *const () as usize,
     b"pthread_rwlock_destroy" => rwlock_destroy as *const () as usize,
     b"pthread_rwlock_rdlock" => rwlock_rdlock as *const () as usize,

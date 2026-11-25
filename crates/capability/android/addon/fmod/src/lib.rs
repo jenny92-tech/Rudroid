@@ -95,6 +95,13 @@ pub const SET_OUTPUT_SYMBOLS: [&str; 3] = [
 pub enum FmodOutcome {
     /// Waiting for the Unity module event.
     Pending,
+    /// Engine-embedded FMOD selection: only the shared-VM `org/fmod` class
+    /// surface is registered. This says NOTHING about a mixer being open,
+    /// audible playback, or an SDK/authorization result, and it is reached
+    /// without any module subscription or `SetOutput` detour (the
+    /// forced-NOSOUND + OK fallback cannot run here). The engine's own
+    /// `fmodGetInfo`/`fmodProcess` stay the engine's and stay honest.
+    EmbeddedUnityAudio,
     /// No guest FMOD library: the explicit stub state (org/fmod registered).
     StubbedMissingGuest,
     /// The Fmod module event fired with a real provider load and the
@@ -159,6 +166,10 @@ pub fn register_jni(api: &HostApiV0) -> c_int {
         return -2;
     }
     let Some(vm) = api.java_vm() else {
+        if audio::embedded_unity_audio(api) {
+            api.log_error(c"FMOD", "embedded Unity audio requires the shared JNI VM");
+            return -3;
+        }
         api_log(
             api,
             "no JNI session registered — org/fmod registration skip (deploy \
@@ -169,6 +180,18 @@ pub fn register_jni(api: &HostApiV0) -> c_int {
     match join_shared_session(api, vm) {
         Ok(()) => {
             *JNI_JOINED.lock().unwrap() = true;
+            if audio::embedded_unity_audio(api) {
+                // Class-surface fact only: no mixer-open, playback, format or
+                // SDK/authorization claim belongs in this line.
+                set_outcome(FmodOutcome::EmbeddedUnityAudio);
+                api_log(
+                    api,
+                    "org/fmod class surface registered for embedded Unity FMOD \
+                     (real AudioOutput mixer bridge live; no checkInit helper, \
+                     no SetOutput hook, no audio or SDK success claim)",
+                );
+                return 0;
+            }
             // Oracle log line (sdk_fmod.cpp register_jni).
             api_log(api, "FMOD Java/AudioTrack JNI STUB set registered");
             0
@@ -188,17 +211,22 @@ fn join_shared_session(api: &HostApiV0, vm: JavaVm) -> Result<(), &'static str> 
 }
 
 fn join_with_env(api: &HostApiV0, env: JniEnv) -> Result<(), &'static str> {
-    let _ = api;
     let name = |value: &str| CString::new(value).map_err(|_| "class name contained NUL");
+    let embedded = audio::embedded_unity_audio(api);
 
     // The oracle registers org/fmod/{FMODAudioDevice,AudioDevice,FMOD};
     // libfmod looks up org/fmod/AudioDevice (fakefmod.h notes). All resolve
-    // through the shared session's class table.
-    for class in [
+    // through the shared session's class table. Embedded Unity FMOD owns its
+    // own SDK initialization, so `org/fmod/FMOD` is not part of this join: the
+    // addon must neither register nor query the `checkInit` constant-true or
+    // empty `init` helper there. Other shared-VM providers are independent.
+    const CLASSES: [&str; 3] = [
         "org/fmod/FMODAudioDevice",
         "org/fmod/AudioDevice",
         "org/fmod/FMOD",
-    ] {
+    ];
+    let classes: &[&str] = if embedded { &CLASSES[..2] } else { &CLASSES };
+    for &class in classes {
         let c_name = name(class)?;
         let handle = env.find_class(&c_name);
         if handle.is_null() {
@@ -207,30 +235,38 @@ fn join_with_env(api: &HostApiV0, env: JniEnv) -> Result<(), &'static str> {
             }
             return Err("an org/fmod class did not resolve");
         }
+        env.delete_local_ref(handle);
     }
 
-    // FMOD.checkInit ()Z == true through the catalog-backed resolution (the
-    // oracle's Java surface answers before setOutput runs).
-    let fmod_class = name("org/fmod/FMOD")?;
-    let fmod = env.find_class(&fmod_class);
-    if fmod.is_null() {
-        return Err("org/fmod/FMOD did not resolve");
+    let anchor_class = if embedded { "org/fmod/AudioDevice" } else { "org/fmod/FMOD" };
+    let anchor_class = name(anchor_class)?;
+    let class = env.find_class(&anchor_class);
+    if class.is_null() {
+        return Err("the org/fmod anchor class did not resolve");
     }
-    let c_method = name("checkInit")?;
-    let c_sig = name("()Z")?;
-    let Some(method_id) = env.static_method(fmod, &c_method, &c_sig) else {
-        if env.exception_check() {
-            env.exception_clear();
+    if !embedded {
+        // FMOD.checkInit ()Z == true through the catalog-backed resolution (the
+        // oracle's Java surface answers before setOutput runs). Legacy posture
+        // only; embedded mode never asks the VM this question.
+        let c_method = name("checkInit")?;
+        let c_sig = name("()Z")?;
+        let Some(method_id) = env.static_method(class, &c_method, &c_sig) else {
+            env.delete_local_ref(class);
+            if env.exception_check() {
+                env.exception_clear();
+            }
+            return Err("FMOD.checkInit did not resolve against the catalog");
+        };
+        let ready = env.call_static_boolean(class, method_id, &[]);
+        if !ready {
+            env.delete_local_ref(class);
+            return Err("FMOD.checkInit did not answer true");
         }
-        return Err("FMOD.checkInit did not resolve against the catalog");
-    };
-    let ready = env.call_static_boolean(fmod, method_id, &[]);
-    if !ready {
-        return Err("FMOD.checkInit did not answer true");
     }
 
     // The session anchor.
-    let anchor = env.new_global_ref(fmod);
+    let anchor = env.new_global_ref(class);
+    env.delete_local_ref(class);
     if anchor.is_null() {
         return Err("NewGlobalRef anchor failed");
     }
@@ -456,6 +492,18 @@ pub unsafe fn plugin_init(api: &HostApiV0) -> c_int {
         return -2;
     }
     audio::configure(api);
+    if audio::embedded_unity_audio(api) {
+        // Selected mode: the mixer policy is configured as usual, and NOTHING
+        // here subscribes to Unity/Fmod/FmodStudio or installs a detour, so the
+        // historical forced-NOSOUND + OK fallback is unreachable even if a Fmod
+        // module event is emitted. No ARMED state exists to serve a hook body.
+        api_log(
+            api,
+            "embedded Unity FMOD selected: no module subscription, no SetOutput \
+             detour (class-surface mode, not audio or SDK acceptance)",
+        );
+        return 0;
+    }
     let user = STATES.insert(ArmedState {
         api: *api,
     });
